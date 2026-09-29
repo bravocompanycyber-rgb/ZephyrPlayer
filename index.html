@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ZephyrPlayer</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="icon" href="assets/icons/favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+          </svg>
+          <span>Zephyr</span>
+        </div>
+        <button class="icon-btn" id="closeSidebar" title="Close">✕</button>
+      </div>
+
+      <div class="playlist-actions">
+        <button class="btn btn-primary" id="addFilesBtn" title="Open files (Ctrl+O)">+ Open</button>
+        <button class="btn btn-ghost" id="addUrlBtn" title="Open URL / YouTube">🔗 URL</button>
+        <button class="btn btn-ghost" id="addFolderBtn" title="Open folder">📁</button>
+        <button class="btn btn-ghost" id="savePlaylistBtn" title="Save playlist (m3u)">💾</button>
+        <button class="btn btn-ghost" id="loadPlaylistBtn" title="Load playlist (m3u)">📂</button>
+        <button class="btn btn-ghost" id="clearPlaylistBtn" title="Clear">🗑</button>
+      </div>
+
+      <div class="sidebar-tabs" id="sidebarTabs">
+        <button type="button" class="side-tab active" data-tab="queue">Queue</button>
+        <button type="button" class="side-tab" data-tab="library">Library</button>
+        <button type="button" class="side-tab" data-tab="recent">Recent</button>
+      </div>
+
+      <div class="playlist-tools" id="queueTools">
+        <button class="tool-btn" id="shuffleBtn" title="Shuffle">🔀</button>
+        <button class="tool-btn" id="repeatBtn" title="Repeat: Off">🔁 Off</button>
+      </div>
+
+      <ul class="playlist" id="playlist"></ul>
+
+      <div id="libraryView" class="library-view" hidden>
+        <div class="library-toolbar">
+          <button class="btn btn-ghost" id="libScanBtn" title="Scan folder into library">Scan folder</button>
+          <input type="search" id="libSearch" placeholder="Search…" />
+        </div>
+        <div id="libraryList" class="library-list"></div>
+      </div>
+
+      <div id="recentView" class="library-view" hidden>
+        <div id="recentList" class="library-list"></div>
+      </div>
+
+      <div class="sidebar-footer">
+        <span id="trackCount">0 tracks</span>
+      </div>
+    </aside>
+
+    <main class="player-area">
+      <header class="top-bar">
+        <button class="icon-btn" id="toggleSidebar" title="Playlist">☰</button>
+        <div class="title-area">
+          <h1 id="videoTitle">ZephyrPlayer</h1>
+          <p id="videoSubtitle">Open files or drop media here</p>
+        </div>
+        <div class="top-actions">
+          <select id="qualitySelect" class="quality-select" title="Playback quality (mpv)">
+            <option value="high">Quality: High</option>
+            <option value="sharpen">Quality: Sharpen</option>
+            <option value="anime">Quality: Anime</option>
+            <option value="anime4k">Quality: Anime4K</option>
+            <option value="hdr">Quality: HDR map</option>
+            <option value="fast">Quality: Fast</option>
+          </select>
+          <button class="icon-btn" id="miniModeBtn" title="Mini player">▬</button>
+          <button class="icon-btn" id="alwaysOnTopBtn" title="Always on top">📌</button>
+          <button class="icon-btn" id="settingsBtn" title="Settings">⚙</button>
+          <select id="embedSelect" class="quality-select" title="mpv embed mode">
+            <option value="sync">Embed: Synced</option>
+            <option value="wid">Embed: Full window</option>
+            <option value="off">Embed: Off</option>
+          </select>
+          <button class="icon-btn" id="mpvPlayBtn" title="Play current with mpv (best quality)">▶ mpv</button>
+          <span id="mpvStatus" style="font-size:0.7rem;color:var(--text-muted);margin-right:6px;"></span>
+          <button class="icon-btn" id="themeToggle" title="Theme">🌓</button>
+        </div>
+      </header>
+
+      <div class="video-wrapper" id="videoWrapper">
+        <video id="video" preload="metadata"></video>
+        <div id="subtitleDisplay" class="subtitle-display"></div>
+
+        <div class="drop-zone" id="dropZone">
+          <div class="drop-content">
+            <div class="drop-icon">🎬</div>
+            <h2>Drop media here</h2>
+            <p>Video • Audio • Subtitles (.srt / .vtt)</p>
+            <div class="drop-btns">
+              <button class="btn btn-primary" id="browseBtn">Open Files</button>
+              <button class="btn btn-ghost" id="browseFolderBtn">Open Folder</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="loader" id="loader" hidden><div class="spinner"></div></div>
+        <button class="big-play" id="bigPlay" hidden>▶</button>
+        <div class="osd" id="osd" hidden></div>
+      </div>
+
+      <div class="controls" id="controls">
+        <div class="progress-container">
+          <div class="seek-preview" id="seekPreview" hidden>
+            <canvas id="seekCanvas" width="160" height="90"></canvas>
+            <div class="seek-preview-time" id="seekPreviewTime">0:00</div>
+          </div>
+          <div class="progress-bar" id="progressBar">
+            <div class="progress-buffered" id="buffered"></div>
+            <div class="progress-ab" id="abRange" hidden></div>
+            <div class="progress-chapters" id="chapterMarks"></div>
+            <div class="progress-played" id="played"></div>
+            <div class="progress-handle" id="handle"></div>
+          </div>
+          <div class="time">
+            <span id="currentTime">0:00</span> / <span id="duration">0:00</span>
+          </div>
+        </div>
+
+        <div class="controls-row">
+          <div class="controls-left">
+            <button class="ctrl-btn" id="prevBtn" title="Previous track">|◀</button>
+            <button class="ctrl-btn play-btn" id="playPauseBtn" title="Play/Pause (Space)">
+              <span class="icon-play">▶</span>
+              <span class="icon-pause" hidden>⏸</span>
+            </button>
+            <button class="ctrl-btn" id="nextBtn" title="Next track">▶|</button>
+            <div class="volume-group">
+              <button class="ctrl-btn" id="muteBtn" title="Mute (M)">🔊</button>
+              <input type="range" id="volumeSlider" class="volume-slider" min="0" max="1.5" step="0.01" value="1" title="Volume (up to 150%)" />
+            </div>
+          </div>
+
+          <div class="controls-center">
+            <button class="ctrl-btn" id="rewindBtn" title="-10 seconds">−10</button>
+            <button class="ctrl-btn" id="forwardBtn" title="+10 seconds">+10</button>
+            <button class="ctrl-btn" id="abLoopBtn" title="A-B Loop">A-B</button>
+            <button class="ctrl-btn" id="screenshotBtn" title="Screenshot (S)">📷</button>
+            <button class="ctrl-btn" id="moreBtn" title="More tools">⋯</button>
+          </div>
+
+          <div class="controls-right">
+            <button class="ctrl-btn" id="subBtn" title="Subtitles">CC</button>
+            <button class="ctrl-btn" id="audioBtn" title="Audio track">🎵</button>
+            <button class="ctrl-btn" id="speedBtn" title="Speed"><span id="speedLabel">1×</span></button>
+            <button class="ctrl-btn" id="pipBtn" title="PiP">⧉</button>
+            <button class="ctrl-btn" id="fullscreenBtn" title="Fullscreen (F)">⛶</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <input type="file" id="fileInput" accept="video/*,audio/*,.srt,.vtt,.ass,.ssa" multiple hidden />
+  <input type="file" id="folderInput" webkitdirectory directory multiple hidden />
+  <input type="file" id="m3uInput" accept=".m3u,.m3u8,audio/x-mpegurl" hidden />
+  <input type="file" id="subInput" accept=".srt,.vtt,.ass,.ssa,text/vtt" hidden />
+
+  <div class="popup-menu" id="moreMenu" hidden>
+    <div class="menu-header"><span>Tools</span><button type="button" class="menu-close" id="closeMoreMenu">✕</button></div>
+    <button type="button" id="frameBackBtn">Previous frame (−1f)</button>
+    <button type="button" id="frameFwdBtn">Next frame (+1f)</button>
+    <div class="menu-divider"></div>
+    <button type="button" id="videoAdjBtn">Video adjustments</button>
+    <button type="button" id="geomBtn">Aspect / rotate / crop</button>
+    <button type="button" id="eqBtn">Equalizer</button>
+    <button type="button" id="infoBtn">Media info</button>
+    <button type="button" id="bookmarkBtn">Bookmarks</button>
+    <button type="button" id="chapterBtn">Chapters</button>
+    <div class="menu-divider"></div>
+    <button type="button" id="sleepBtn">Sleep timer</button>
+    <button type="button" id="networkBtn">Open network path…</button>
+    <button type="button" id="assStyleBtn">Subtitle style (ASS)</button>
+    <button type="button" id="audioAdvBtn">Advanced audio</button>
+    <button type="button" id="aboutBtn">About / Help</button>
+    <button type="button" id="assocBtn">File associations…</button>
+  </div>
+
+  <div class="popup-menu" id="speedMenu" hidden>
+    <button data-speed="0.25">0.25×</button>
+    <button data-speed="0.5">0.5×</button>
+    <button data-speed="0.75">0.75×</button>
+    <button data-speed="1" class="active">1× Normal</button>
+    <button data-speed="1.25">1.25×</button>
+    <button data-speed="1.5">1.5×</button>
+    <button data-speed="1.75">1.75×</button>
+    <button data-speed="2">2×</button>
+  </div>
+
+  <div class="popup-menu popup-menu-wide" id="subMenu" hidden>
+    <div class="menu-header">
+      <span>Subtitles</span>
+      <button type="button" id="closeSubMenu" class="menu-close">✕</button>
+    </div>
+    <button data-action="off">Off</button>
+    <button data-action="load">Load external…</button>
+    <div class="menu-divider"></div>
+    <div id="subTracks"></div>
+    <div class="menu-divider"></div>
+    <div class="menu-slider-row">
+      <span>Delay</span>
+      <input type="range" id="subDelay" min="-10" max="10" step="0.1" value="0" />
+      <span id="subDelayVal">0.0s</span>
+    </div>
+    <div class="menu-slider-row">
+      <span>Size</span>
+      <input type="range" id="subSize" min="50" max="200" step="5" value="100" />
+      <span id="subSizeVal">100%</span>
+    </div>
+    <div class="menu-slider-row">
+      <span>Position</span>
+      <input type="range" id="subPos" min="0" max="100" step="1" value="10" />
+      <span id="subPosVal">Bottom</span>
+    </div>
+  </div>
+
+  <div class="popup-menu" id="audioMenu" hidden>
+    <div id="audioTracks"></div>
+  </div>
+
+  <!-- URL / YouTube panel -->
+  <div class="settings-panel" id="urlPanel" hidden>
+    <div class="settings-header">
+      <h3>Open URL / YouTube</h3>
+      <button class="icon-btn" id="closeUrlPanel">✕</button>
+    </div>
+    <div class="settings-body">
+      <label class="setting-row" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <span>Paste link (YouTube, direct video URL, etc.)</span>
+        <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-family:inherit;" />
+      </label>
+      <p class="settings-note">Requires <b>mpv</b> + <b>yt-dlp</b> for YouTube. Direct video links work with mpv alone.</p>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
+        <button class="btn btn-ghost" id="cancelUrlBtn">Cancel</button>
+        <button class="btn btn-primary" id="playUrlBtn">Play</button>
+      </div>
+    </div>
+  </div>
+
+  
+  <!-- Video adjustments -->
+  <div class="settings-panel" id="videoAdjPanel" hidden>
+    <div class="settings-header">
+      <h3>Video adjustments</h3>
+      <button class="icon-btn" id="closeVideoAdj">✕</button>
+    </div>
+    <div class="settings-body">
+      <label class="setting-row"><span>Brightness</span><input type="range" id="adjBrightness" min="-100" max="100" value="0" /></label>
+      <label class="setting-row"><span>Contrast</span><input type="range" id="adjContrast" min="-100" max="100" value="0" /></label>
+      <label class="setting-row"><span>Saturation</span><input type="range" id="adjSaturation" min="-100" max="100" value="0" /></label>
+      <label class="setting-row"><span>Gamma</span><input type="range" id="adjGamma" min="-100" max="100" value="0" /></label>
+      <label class="setting-row"><span>Hue</span><input type="range" id="adjHue" min="-100" max="100" value="0" /></label>
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <button class="btn btn-ghost" id="adjResetBtn">Reset</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Equalizer -->
+  <div class="settings-panel" id="eqPanel" hidden>
+    <div class="settings-header">
+      <h3>Audio equalizer</h3>
+      <button class="icon-btn" id="closeEq">✕</button>
+    </div>
+    <div class="settings-body">
+      <label class="setting-row"><span>Normalize / loudnorm</span><input type="checkbox" id="eqNormalize" /></label>
+      <label class="setting-row"><span>Bass</span><input type="range" id="eqBass" min="-12" max="12" value="0" /></label>
+      <label class="setting-row"><span>Mid</span><input type="range" id="eqMid" min="-12" max="12" value="0" /></label>
+      <label class="setting-row"><span>Treble</span><input type="range" id="eqTreble" min="-12" max="12" value="0" /></label>
+      <label class="setting-row"><span>Extra volume (dB)</span><input type="range" id="eqGain" min="0" max="20" value="0" /></label>
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <button class="btn btn-ghost" id="eqResetBtn">Reset</button>
+        <button class="btn btn-primary" id="eqApplyBtn">Apply to mpv</button>
+      </div>
+      <p class="settings-note">EQ applies when playing through mpv. Built-in player has limited audio filter support.</p>
+    </div>
+  </div>
+
+  <!-- Media info -->
+  <div class="settings-panel" id="infoPanel" hidden>
+    <div class="settings-header">
+      <h3>Media info</h3>
+      <button class="icon-btn" id="closeInfo">✕</button>
+    </div>
+    <div class="settings-body">
+      <pre id="mediaInfoText" style="font-size:0.78rem;line-height:1.5;white-space:pre-wrap;color:var(--text-muted);max-height:320px;overflow:auto;">No file loaded</pre>
+    </div>
+  </div>
+
+  
+  <div class="settings-panel" id="bookmarkPanel" hidden>
+    <div class="settings-header">
+      <h3>Bookmarks</h3>
+      <button class="icon-btn" id="closeBookmarks">✕</button>
+    </div>
+    <div class="settings-body">
+      <div style="display:flex;gap:8px;margin-bottom:10px;">
+        <button class="btn btn-primary" id="addBookmarkBtn">+ Add at current time</button>
+      </div>
+      <ul id="bookmarkList" class="bookmark-list"></ul>
+      <p class="settings-note">Bookmarks are saved per file in local storage.</p>
+    </div>
+  </div>
+
+  <div class="settings-panel" id="chapterPanel" hidden>
+    <div class="settings-header">
+      <h3>Chapters</h3>
+      <button class="icon-btn" id="closeChapters">✕</button>
+    </div>
+    <div class="settings-body">
+      <ul id="chapterList" class="bookmark-list"></ul>
+      <p class="settings-note" id="chapterNote">Chapters appear when the file provides them, or add bookmarks as custom markers.</p>
+    </div>
+  </div>
+
+  
+  <div class="settings-panel" id="geomPanel" hidden>
+    <div class="settings-header">
+      <h3>Aspect · Rotate · Crop</h3>
+      <button class="icon-btn" id="closeGeom">✕</button>
+    </div>
+    <div class="settings-body">
+      <label class="setting-row"><span>Aspect ratio</span>
+        <select id="geomAspect">
+          <option value="native">Native</option>
+          <option value="16:9">16:9</option>
+          <option value="4:3">4:3</option>
+          <option value="1:1">1:1</option>
+          <option value="2.35:1">2.35:1 Cinema</option>
+          <option value="16:10">16:10</option>
+        </select>
+      </label>
+      <label class="setting-row"><span>Rotate</span>
+        <select id="geomRotate">
+          <option value="0">0°</option>
+          <option value="90">90°</option>
+          <option value="180">180°</option>
+          <option value="270">270°</option>
+        </select>
+      </label>
+      <label class="setting-row"><span>Flip horizontal</span><input type="checkbox" id="geomFlipH" /></label>
+      <label class="setting-row"><span>Flip vertical</span><input type="checkbox" id="geomFlipV" /></label>
+      <label class="setting-row"><span>Pan scan (zoom)</span>
+        <input type="range" id="geomPanscan" min="0" max="100" value="0" />
+      </label>
+      <label class="setting-row"><span>HDR tone map</span>
+        <select id="geomHdr">
+          <option value="auto">Auto / default</option>
+          <option value="mobius">Mobius</option>
+          <option value="reinhard">Reinhard</option>
+          <option value="hable">Hable</option>
+          <option value="gamma">Gamma</option>
+          <option value="linear">Linear</option>
+          <option value="clip">Clip</option>
+          <option value="no">Off</option>
+        </select>
+      </label>
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <button class="btn btn-ghost" id="geomResetBtn">Reset</button>
+        <button class="btn btn-primary" id="geomApplyBtn">Apply to mpv</button>
+      </div>
+      <p class="settings-note">
+        <b>Anime4K:</b> place GLSL shaders in a <code>shaders</code> folder next to the app, then choose Quality → Anime4K.<br>
+        HDR options apply when playing HDR content through mpv.
+      </p>
+    </div>
+  </div>
+
+  <div class="settings-panel" id="settingsPanel" hidden>
+    <div class="settings-header">
+      <h3>Settings</h3>
+      <button class="icon-btn" id="closeSettings">✕</button>
+    </div>
+    <div class="settings-body">
+      <label class="setting-row"><span>Theme / skin</span>
+        <select id="settingTheme">
+          <option value="dark">Dark (default)</option>
+          <option value="light">Light</option>
+          <option value="amoled">AMOLED black</option>
+          <option value="ocean">Ocean</option>
+          <option value="forest">Forest</option>
+        </select>
+      </label>
+      <label class="setting-row"><span>Performance</span>
+        <select id="settingPerf">
+          <option value="smooth">Smooth (balanced)</option>
+          <option value="low">Low CPU/GPU</option>
+          <option value="quality">Max quality</option>
+        </select>
+      </label>
+      <label class="setting-row"><span>Video output (mpv)</span>
+        <select id="settingVo">
+          <option value="gpu">GPU auto</option>
+          <option value="gpu-next">GPU-next</option>
+          <option value="direct3d">Direct3D 11</option>
+          <option value="libmpv">libmpv</option>
+        </select>
+      </label>
+      <label class="setting-row"><span>Hardware decode</span>
+        <select id="settingHwdec">
+          <option value="auto">Auto</option>
+          <option value="d3d11va">D3D11VA</option>
+          <option value="dxva2">DXVA2</option>
+          <option value="cuda">CUDA / NVDEC</option>
+          <option value="no">Off (software)</option>
+        </select>
+      </label>
+      <label class="setting-row"><span>Default volume</span>
+        <input type="range" id="settingVolume" min="0" max="1.5" step="0.05" value="1" />
+      </label>
+      <label class="setting-row"><span>Seek step (s)</span>
+        <input type="number" id="settingSeek" min="5" max="60" value="10" />
+      </label>
+      <label class="setting-row"><span>Auto-play next</span>
+        <input type="checkbox" id="settingAutoNext" checked />
+      </label>
+      <label class="setting-row"><span>Remember position</span>
+        <input type="checkbox" id="settingRemember" checked />
+      </label>
+      <button class="btn btn-ghost" id="clearHistoryBtn" style="margin-top:6px;">Clear watch history</button>
+      <label class="setting-row"><span>Audio device (mpv)</span>
+        <select id="settingAudioDevice">
+          <option value="auto">Auto</option>
+        </select>
+      </label>
+      <label class="setting-row"><span>Sleep timer (minutes, 0=off)</span>
+        <input type="number" id="settingSleep" min="0" max="300" value="0" />
+      </label>
+      <div class="menu-divider" style="margin:10px 0;"></div>
+      <p style="font-size:0.82rem;font-weight:600;margin-bottom:6px;">Custom hotkeys</p>
+      <label class="setting-row"><span>Play/Pause</span><input type="text" id="hkPlay" value="Space" maxlength="20" style="width:100px;" /></label>
+      <label class="setting-row"><span>Fullscreen</span><input type="text" id="hkFull" value="f" maxlength="20" style="width:100px;" /></label>
+      <label class="setting-row"><span>Mute</span><input type="text" id="hkMute" value="m" maxlength="20" style="width:100px;" /></label>
+      <label class="setting-row"><span>Screenshot</span><input type="text" id="hkShot" value="s" maxlength="20" style="width:100px;" /></label>
+      <label class="setting-row"><span>Bookmark</span><input type="text" id="hkBook" value="b" maxlength="20" style="width:100px;" /></label>
+      <button class="btn btn-ghost" id="hkSaveBtn" style="margin-top:8px;">Save hotkeys</button>
+      <p class="settings-note">
+        mpv + yt-dlp for full codecs and YouTube. Audio device list refreshes when mpv is available.
+      </p>
+    </div>
+  </div>
+
+  <!-- Sleep timer overlay -->
+  <div class="settings-panel" id="sleepPanel" hidden>
+    <div class="settings-header">
+      <h3>Sleep timer</h3>
+      <button class="icon-btn" id="closeSleep">✕</button>
+    </div>
+    <div class="settings-body">
+      <label class="setting-row"><span>Minutes</span>
+        <input type="number" id="sleepMinutes" min="1" max="300" value="30" />
+      </label>
+      <label class="setting-row"><span>Action</span>
+        <select id="sleepAction">
+          <option value="stop">Stop playback</option>
+          <option value="exit">Quit app</option>
+        </select>
+      </label>
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <button class="btn btn-primary" id="sleepStartBtn">Start timer</button>
+        <button class="btn btn-ghost" id="sleepCancelBtn">Cancel</button>
+      </div>
+      <p id="sleepStatus" class="settings-note">Timer off</p>
+    </div>
+  </div>
+
+  <!-- Right-click context menu -->
+  <div class="popup-menu" id="ctxMenu" hidden>
+    <button data-ctx="play">Play / Pause</button>
+    <button data-ctx="fullscreen">Fullscreen</button>
+    <button data-ctx="mute">Mute</button>
+    <div class="menu-divider"></div>
+    <button data-ctx="open">Open files…</button>
+    <button data-ctx="url">Open URL…</button>
+    <button data-ctx="folder">Open folder…</button>
+    <div class="menu-divider"></div>
+    <button data-ctx="sub">Subtitles…</button>
+    <button data-ctx="gen-en">Generate English subtitles…</button>
+    <button data-ctx="browse-sub">Browse / edit subtitles…</button>
+    <button data-ctx="sub-load">Load subtitle file…</button>
+    <div class="menu-divider"></div>
+    <button data-ctx="shot">Screenshot</button>
+    <button data-ctx="info">Media info</button>
+    <button data-ctx="bookmark">Add bookmark</button>
+  </div>
+
+  <!-- Subtitle browser / AI panel -->
+  <div class="settings-panel settings-panel-lg" id="subBrowsePanel" hidden>
+    <div class="settings-header">
+      <h3>Subtitles</h3>
+      <button class="icon-btn" id="closeSubBrowse">✕</button>
+    </div>
+    <div class="settings-body">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+        <button class="btn btn-primary" id="genEnSubBtn">Generate English subtitles</button>
+        <button class="btn btn-ghost" id="subBrowseLoadBtn">Load SRT</button>
+        <button class="btn btn-ghost" id="subBrowseSaveBtn">Save SRT</button>
+        <button class="btn btn-ghost" id="subSyncMinus">Sync −0.5s</button>
+        <button class="btn btn-ghost" id="subSyncPlus">Sync +0.5s</button>
+        <button class="btn btn-ghost" id="subSyncReset">Reset sync</button>
+      </div>
+      <label class="setting-row"><span>Whisper model</span>
+        <select id="whisperModel">
+          <option value="tiny">Tiny (fastest)</option>
+          <option value="base" selected>Base</option>
+          <option value="small">Small</option>
+          <option value="medium">Medium</option>
+        </select>
+      </label>
+      <p id="subAiStatus" class="settings-note">AI: prefers translating existing subs; otherwise needs local whisper.cpp / whisper-cli.</p>
+      <div class="sub-editor-wrap">
+        <table class="sub-editor" id="subEditorTable">
+          <thead><tr><th>#</th><th>Start</th><th>End</th><th>Text</th><th></th></tr></thead>
+          <tbody id="subEditorBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-panel" id="aboutPanel" hidden>
+    <div class="settings-header">
+      <h3>About ZephyrPlayer</h3>
+      <button class="icon-btn" id="closeAbout">✕</button>
+    </div>
+    <div class="settings-body about-body">
+      <p><strong>ZephyrPlayer</strong> <span id="aboutVersion">2.5.0</span></p>
+      <p>Local desktop media player. No accounts. No required online APIs.</p>
+      <p><strong>Support</strong><br>
+        Email: <a href="mailto:bravocompanycyber@gmail.com">bravocompanycyber@gmail.com</a>
+      </p>
+      <p><strong>License</strong><br>
+        Application: ZephyrPlayer License (see LICENSE.txt)<br>
+        Third-party: Electron, mpv, FFmpeg, yt-dlp — their own open-source licenses
+      </p>
+      <p><strong>Privacy</strong><br>
+        Playback, library, bookmarks, and subtitles stay on this PC. Optional tools (mpv, yt-dlp, whisper-cli) run locally.
+      </p>
+      <p><strong>Windows</strong><br>
+        Use File associations export or Default apps. Code-signing certificate can be applied when you publish a built installer.
+      </p>
+      <button class="btn btn-primary" id="aboutCloseBtn">Close</button>
+    </div>
+  </div>
+
+  <div class="settings-panel" id="assStylePanel" hidden>
+    <div class="settings-header">
+      <h3>Subtitle style</h3>
+      <button class="icon-btn" id="closeAssStyle">✕</button>
+    </div>
+    <div class="settings-body">
+      <label class="setting-row"><span>Font size scale</span><input type="range" id="assScale" min="50" max="200" value="100" /></label>
+      <label class="setting-row"><span>Font</span>
+        <select id="assFont">
+          <option>Sans</option><option>Arial</option><option>Roboto</option><option>Georgia</option><option>Consolas</option>
+        </select>
+      </label>
+      <label class="setting-row"><span>Color</span><input type="color" id="assColor" value="#ffffff" /></label>
+      <label class="setting-row"><span>Outline color</span><input type="color" id="assOutline" value="#000000" /></label>
+      <label class="setting-row"><span>Outline width</span><input type="range" id="assOutlineW" min="0" max="8" value="2" /></label>
+      <label class="setting-row"><span>Shadow</span><input type="range" id="assShadow" min="0" max="8" value="1" /></label>
+      <label class="setting-row"><span>Background box</span><input type="checkbox" id="assBack" /></label>
+      <label class="setting-row"><span>Bold</span><input type="checkbox" id="assBold" /></label>
+      <button class="btn btn-primary" id="assApplyBtn" style="margin-top:10px;">Apply</button>
+      <p class="settings-note">Applies to on-screen subs and mpv --sub-* flags when using mpv.</p>
+    </div>
+  </div>
+
+  <div class="settings-panel" id="audioAdvPanel" hidden>
+    <div class="settings-header">
+      <h3>Advanced audio</h3>
+      <button class="icon-btn" id="closeAudioAdv">✕</button>
+    </div>
+    <div class="settings-body">
+      <label class="setting-row"><span>ReplayGain</span>
+        <select id="audReplayGain"><option value="no">Off</option><option value="track">Track</option><option value="album">Album</option></select>
+      </label>
+      <label class="setting-row"><span>Audio delay (s)</span><input type="number" id="audDelay" min="-5" max="5" step="0.1" value="0" /></label>
+      <label class="setting-row"><span>Channels</span>
+        <select id="audChannels"><option value="auto">Auto</option><option value="mono">Mono</option><option value="stereo">Stereo</option><option value="2.1">2.1</option><option value="5.1">5.1</option><option value="7.1">7.1</option></select>
+      </label>
+      <label class="setting-row"><span>Downmix to stereo</span><input type="checkbox" id="audDownmix" /></label>
+      <label class="setting-row"><span>Bitstream / passthrough</span><input type="checkbox" id="audBitstream" /></label>
+      <label class="setting-row"><span>Visualization (mpv)</span>
+        <select id="audVis"><option value="no">Off</option><option value="showcqt">ShowCQT</option><option value="avectorscope">Vectorscope</option></select>
+      </label>
+      <button class="btn btn-primary" id="audAdvApplyBtn" style="margin-top:10px;">Apply to mpv</button>
+    </div>
+  </div>
+
+  <div class="settings-panel" id="networkPanel" hidden>
+    <div class="settings-header">
+      <h3>Network / SMB / stream</h3>
+      <button class="icon-btn" id="closeNetwork">✕</button>
+    </div>
+    <div class="settings-body">
+      <label class="setting-row" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <span>Path or URL</span>
+        <input type="text" id="networkPath" placeholder="\\NAS\Movies  or  smb://…  or  http://…  or  rtsp://…" style="padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);" />
+      </label>
+      <p class="settings-note">SMB/UNC: map drive in Windows Explorer first if needed, then paste path. DLNA: open the device URL or IPTV M3U. HLS/DASH/HTTP work via mpv + yt-dlp.</p>
+      <button class="btn btn-primary" id="networkOpenBtn">Open</button>
+    </div>
+  </div>
+
+  <div class="settings-panel" id="assocPanel" hidden>
+    <div class="settings-header">
+      <h3>File associations</h3>
+      <button class="icon-btn" id="closeAssoc">✕</button>
+    </div>
+    <div class="settings-body">
+      <p class="settings-note">Creates a <code>.reg</code> file to register common video types with ZephyrPlayer for the current user. Review then double-click the .reg, or use Windows Default apps.</p>
+      <button class="btn btn-primary" id="assocExportBtn">Export association .reg</button>
+      <button class="btn btn-ghost" id="assocOpenDefaultsBtn">Open Windows Default apps</button>
+    </div>
+  </div>
+
+  <script src="js/player.js"></script>
+</body>
+</html>

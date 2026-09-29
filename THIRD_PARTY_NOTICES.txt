@@ -1,0 +1,10 @@
+ZephyrPlayer third-party notices
+Support: bravocompanycyber@gmail.com
+
+This product may load user-supplied binaries:
+  mpv.exe, yt-dlp.exe, whisper-cli.exe, GLSL shaders
+
+Those components retain their original licenses. ZephyrPlayer does not grant
+rights to those projects beyond what their authors already provide.
+
+No cloud API keys are required for core operation.

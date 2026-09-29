@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+releases/
+
+# Legacy build generated outside this project
+../ZephyrPlayer-legacy/
+
+# Downloaded/runtime binaries
+ffmpeg/
+mpv.exe
+yt-dlp.exe
+whisper-cli.exe
+whisper.dll
+ggml.dll
+ggml-base.dll
+ggml-cpu-x64.dll
+vulkan-1.dll
+
+# Downloaded AI models
+models/
+
+# Logs / OS files
+*.log
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+!.env.example

@@ -1,0 +1,118 @@
+{
+  "name": "zephyrplayer",
+  "version": "2.5.0",
+  "description": "ZephyrPlayer — local desktop media player (no accounts, no required APIs)",
+  "main": "main.js",
+  "author": {
+    "name": "Bravo Company Cyber",
+    "email": "bravocompanycyber@gmail.com"
+  },
+  "license": "SEE LICENSE.txt",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --enable-logging",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:win:dir": "electron-builder --win --dir",
+    "release:win": "electron-builder --win --publish always"
+  },
+  "build": {
+    "appId": "com.bravocompanycyber.zephyrplayer",
+    "productName": "ZephyrPlayer",
+    "copyright": "Copyright © 2026 Bravo Company Cyber",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "compression": "maximum",
+    "asar": true,
+    "asarUnpack": [
+      "**/*.{exe,dll,node}",
+      "ffmpeg/**/*",
+      "mpv.exe",
+      "vulkan-1.dll",
+      "whisper-cli.exe",
+      "yt-dlp.exe",
+      "ggml*.dll",
+      "whisper.dll"
+    ],
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "package.json",
+      "mpv-controller.js",
+      "css/**/*",
+      "js/**/*",
+      "assets/**/*",
+      "shaders/**/*",
+      "ffmpeg/**/*",
+      "mpv.exe",
+      "vulkan-1.dll",
+      "whisper-cli.exe",
+      "yt-dlp.exe",
+      "ggml-base.dll",
+      "ggml-cpu-x64.dll",
+      "ggml.dll",
+      "whisper.dll",
+      "LICENSE.txt",
+      "THIRD_PARTY_NOTICES.txt"
+    ],
+    "extraResources": [
+      {
+        "from": "models",
+        "to": "models",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "icon": "assets/icons/zephyrplayer.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "ZephyrPlayer-${version}-Windows10+-${ext}",
+      "publisherName": "Bravo Company Cyber"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ZephyrPlayer",
+      "installerIcon": "assets/icons/zephyrplayer.ico",
+      "uninstallerIcon": "assets/icons/zephyrplayer.ico",
+      "installerHeaderIcon": "assets/icons/zephyrplayer.ico",
+      "installerSidebar": null,
+      "uninstallerSidebar": null,
+      "artifactName": "ZephyrPlayer-${version}-Windows10+-Setup.${ext}",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true,
+      "menuCategory": "Multimedia"
+    },
+    "portable": {
+      "artifactName": "ZephyrPlayer-${version}-Windows10+-Portable.${ext}"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "bravocompanycyber-rgb",
+      "repo": "ZephyrPlayer"
+    }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
+    "electron": "28.3.3",
+    "electron-builder": "^24.13.3"
+  }
+}

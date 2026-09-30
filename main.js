@@ -51,13 +51,11 @@ function log(...args) {
     fs.appendFileSync(logFile, line, 'utf8');
   } catch {}
 
-  // Also print to console in development
   if (!app.isPackaged) {
     console.log(...args);
   }
 }
 
-// Catch uncaught errors
 process.on('uncaughtException', (err) => {
   log('UNCAUGHT EXCEPTION:', err);
 });
@@ -81,7 +79,6 @@ let isMini = false;
 let embedMode = 'sync'; // sync | wid | off
 let lastEmbedBounds = null;
 
-// IPC connection to the "synced" borderless mpv window
 let syncIpcPath = null;
 let syncMpvSocket = null;
 
@@ -109,9 +106,6 @@ function connectSyncMpvIpc(pipePath, attempt = 0) {
   });
 }
 
-/*
- * Keep all playback state in one place.
- */
 let lastPlay = {
   inputs: null,
   quality: 'high',
@@ -120,7 +114,7 @@ let lastPlay = {
 };
 
 /* -------------------------------------------------------------------------- */
-/* Helper: correct base path (works in both dev + packaged)                   */
+/* Path helpers (dev + packaged)                                              */
 /* -------------------------------------------------------------------------- */
 
 function getAppPath() {
@@ -138,7 +132,7 @@ function getResourcePath(...parts) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Single instance / open-with-file / recent files (jump list)               */
+/* Single instance / recent files                                             */
 /* -------------------------------------------------------------------------- */
 
 const recentFilesPath = () => path.join(app.getPath('userData'), 'recent.json');
@@ -179,7 +173,6 @@ function updateJumpList() {
       }
     ]);
   } catch (e) {
-    // Common on some Windows privacy settings – not critical
     log('setJumpList failed (privacy settings?):', e.message);
   }
 }
@@ -222,7 +215,7 @@ if (!gotSingleInstanceLock) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* System media keys                                                         */
+/* Media keys & thumbar                                                       */
 /* -------------------------------------------------------------------------- */
 
 function registerMediaKeys() {
@@ -235,10 +228,6 @@ function registerMediaKeys() {
     log('Media key registration failed:', e.message);
   }
 }
-
-/* -------------------------------------------------------------------------- */
-/* Taskbar thumbnail toolbar buttons                                         */
-/* -------------------------------------------------------------------------- */
 
 function setupThumbar() {
   if (!mainWindow || mainWindow.isDestroyed() || process.platform !== 'win32') return;
@@ -299,7 +288,7 @@ function isAbsoluteExecutable(value) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Find executables (packaging-aware)                                         */
+/* Find executables                                                           */
 /* -------------------------------------------------------------------------- */
 
 function findMpv() {
@@ -401,20 +390,42 @@ function findFfmpeg() {
 }
 
 /* -------------------------------------------------------------------------- */
-/* mpv quality                                                                */
+/* Quality arguments (safer defaults + better YouTube + less lag)             */
 /* -------------------------------------------------------------------------- */
 
 function qualityArgs(quality) {
   const q = quality || 'high';
 
   const args = [
-    '--hwdec=auto-safe',
+    '--hwdec=auto-copy',
+    '--hwdec-codecs=all',
     '--vo=gpu',
     '--gpu-api=d3d11',
     '--gpu-context=d3d11',
     '--keep-open=yes',
-    '--force-window=yes'
+    '--force-window=yes',
+    '--cache=yes',
+    '--demuxer-max-bytes=150MiB',
+    '--demuxer-max-back-bytes=75MiB',
+    '--demuxer-readahead-secs=20',
+    '--video-sync=audio',
+    '--audio-pitch-correction=yes',
+    '--ytdl=yes'
   ];
+
+  // YouTube quality control based on selected preset
+  if (q === 'fast') {
+    args.push('--ytdl-format=best[height<=480]/worst');
+    args.push('--scale=bilinear', '--cscale=bilinear', '--profile=fast', '--hwdec=no');
+  } else if (q === 'high' || q === 'sharpen') {
+    args.push('--ytdl-format=bestvideo[height<=1080][vcodec^=avc1]+bestaudio/best[height<=1080]/best');
+  } else if (q === 'anime' || q === 'anime4k') {
+    args.push('--ytdl-format=bestvideo[height<=1080]+bestaudio/best[height<=1080]/best');
+  } else if (q === 'hdr') {
+    args.push('--ytdl-format=bestvideo[height<=1440]+bestaudio/best[height<=1440]/best');
+  } else {
+    args.push('--ytdl-format=bestvideo[height<=720]+bestaudio/best[height<=720]/best');
+  }
 
   if (q === 'high' || q === 'sharpen' || q === 'anime' || q === 'anime4k') {
     args.push(
@@ -439,7 +450,6 @@ function qualityArgs(quality) {
 
   if (q === 'anime4k') {
     const shaderDir = path.join(getAppPath(), 'shaders');
-
     const candidates = [
       'Anime4K_Clamp_Highlights.glsl',
       'Anime4K_Restore_CNN_M.glsl',
@@ -450,7 +460,6 @@ function qualityArgs(quality) {
     ];
 
     const found = [];
-
     try {
       if (fileExists(shaderDir)) {
         for (const name of candidates) {
@@ -459,7 +468,6 @@ function qualityArgs(quality) {
             found.push(shaderPath.replace(/\\/g, '/'));
           }
         }
-
         if (!found.length) {
           for (const name of fs.readdirSync(shaderDir)) {
             if (name.toLowerCase().endsWith('.glsl')) {
@@ -475,11 +483,7 @@ function qualityArgs(quality) {
     if (found.length) {
       args.push('--glsl-shaders=' + found.join(';'));
     } else {
-      args.push(
-        '--scale=ewa_lanczossharp',
-        '--cscale=ewa_lanczossharp',
-        '--sharpen=0.6'
-      );
+      args.push('--scale=ewa_lanczossharp', '--cscale=ewa_lanczossharp', '--sharpen=0.6');
     }
   }
 
@@ -493,19 +497,10 @@ function qualityArgs(quality) {
     );
   }
 
-  if (q === 'fast') {
-    args.push(
-      '--scale=bilinear',
-      '--cscale=bilinear',
-      '--profile=fast'
-    );
-  }
-
   return args;
 }
-
 /* -------------------------------------------------------------------------- */
-/* Embed process management                                                   */
+/* Process management (aggressive kill on Windows)                            */
 /* -------------------------------------------------------------------------- */
 
 function stopEmbedMpv() {
@@ -515,11 +510,28 @@ function stopEmbedMpv() {
   mpvEmbedProcess = null;
 
   try {
-    if (!processToKill.killed) {
-      processToKill.kill();
+    if (process.platform === 'win32' && processToKill.pid) {
+      try {
+        execSync(`taskkill /PID ${processToKill.pid} /T /F`, {
+          stdio: 'ignore',
+          windowsHide: true
+        });
+      } catch {}
+    } else {
+      processToKill.kill('SIGTERM');
+      setTimeout(() => {
+        try {
+          if (!processToKill.killed) processToKill.kill('SIGKILL');
+        } catch {}
+      }, 800);
     }
   } catch (e) {
     log('Failed to stop mpv:', e.message);
+  }
+
+  if (syncMpvSocket) {
+    try { syncMpvSocket.destroy(); } catch {}
+    syncMpvSocket = null;
   }
 }
 
@@ -580,14 +592,19 @@ function playWithMpvEmbedded(filesOrUrl, quality = 'high', preferEmbed = true, e
   const mode = preferEmbed === false ? 'off' : (embedMode || 'sync');
   const args = qualityArgs(quality);
 
+  // Critical: pass absolute path of yt-dlp to mpv
   const ytdlp = findYtDlp();
   if (ytdlp) {
-    args.push('--script-opts=ytdl_hook-ytdl_path=' + ytdlp);
+    const cleanPath = ytdlp.replace(/\\/g, '/');
+    args.push(`--script-opts=ytdl_hook-ytdl_path=${cleanPath}`);
+    log('Using yt-dlp at:', cleanPath);
+  } else {
+    log('WARNING: yt-dlp not found – YouTube will not work');
   }
 
   let embedded = false;
 
-  // True HWND embedding
+  // HWND embedding
   if (mode === 'wid' && process.platform === 'win32' && mainWindow && !mainWindow.isDestroyed()) {
     try {
       const handle = mainWindow.getNativeWindowHandle();
@@ -597,7 +614,6 @@ function playWithMpvEmbedded(filesOrUrl, quality = 'high', preferEmbed = true, e
       } else {
         hwnd = BigInt(handle.readUInt32LE(0));
       }
-
       args.push('--wid=' + hwnd.toString(), '--no-border', '--no-osc', '--osd-level=1');
       embedded = true;
     } catch (e) {
@@ -625,7 +641,6 @@ function playWithMpvEmbedded(filesOrUrl, quality = 'high', preferEmbed = true, e
     }
   }
 
-  // Separate mpv window
   if (mode === 'off') {
     args.push('--force-window=yes');
   }
@@ -637,6 +652,8 @@ function playWithMpvEmbedded(filesOrUrl, quality = 'high', preferEmbed = true, e
   args.push(...inputs);
 
   try {
+    log('Launching mpv with args:', args.join(' '));
+
     const child = spawn(mpvPath, args, {
       stdio: ['ignore', 'ignore', 'pipe'],
       windowsHide: false,
@@ -673,7 +690,7 @@ function playWithMpvEmbedded(filesOrUrl, quality = 'high', preferEmbed = true, e
       if (code !== 0 && code !== null) {
         log('mpv exited with code', code, mpvStderr.slice(-2000));
         safeSend('mpv-process-error', {
-          error: mpvStderr.slice(-500) || ('mpv exited unexpectedly with code ' + code + ' (no output captured — likely a missing DLL/driver crash)')
+          error: mpvStderr.slice(-500) || ('mpv exited with code ' + code)
         });
       }
     });
@@ -752,6 +769,8 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
+
+  mainWindow.webContents.openDevTools();
 
   mainWindow.on('focus', () => sendSyncMpvOntop(true));
   mainWindow.on('blur', () => sendSyncMpvOntop(false));
@@ -869,7 +888,7 @@ function createMenu() {
               detail:
                 'mpv: ' + (mpvPath || 'not found') + '\n' +
                 'yt-dlp: ' + (ytdlpPath || 'not found (needed for YouTube)') + '\n\n' +
-                'Place mpv.exe and optionally yt-dlp.exe next to the app for full power.'
+                'Place mpv.exe and yt-dlp.exe next to the app for full power.'
             });
           }
         },
@@ -889,8 +908,7 @@ function createMenu() {
               dialog.showMessageBox(mainWindow, {
                 type: 'info',
                 title: 'Updates',
-                message: 'Auto-update isn\'t set up.',
-                detail: 'Run "npm install electron-updater" and configure "publish" in package.json to enable this.'
+                message: 'Auto-update isn\'t set up.'
               });
               return;
             }
@@ -898,7 +916,7 @@ function createMenu() {
               dialog.showMessageBox(mainWindow, {
                 type: 'info',
                 title: 'Updates',
-                message: 'Update checks only run in packaged (installed/portable) builds, not in development.'
+                message: 'Update checks only run in packaged builds.'
               });
               return;
             }
@@ -964,7 +982,7 @@ function setupAutoUpdate() {
 }
 
 /* -------------------------------------------------------------------------- */
-/* IPC - dialogs                                                              */
+/* IPC handlers                                                               */
 /* -------------------------------------------------------------------------- */
 
 ipcMain.handle('dialog:openFiles', async () => {
@@ -1017,10 +1035,6 @@ ipcMain.handle('dialog:openFolder', async () => {
   return files;
 });
 
-/* -------------------------------------------------------------------------- */
-/* IPC - window                                                               */
-/* -------------------------------------------------------------------------- */
-
 ipcMain.handle('window:setAlwaysOnTop', () => {
   alwaysOnTop = !alwaysOnTop;
   if (mainWindow) mainWindow.setAlwaysOnTop(alwaysOnTop);
@@ -1046,10 +1060,6 @@ ipcMain.handle('window:hideToTray', async () => {
   return { ok: true };
 });
 
-/* -------------------------------------------------------------------------- */
-/* IPC - mpv availability                                                     */
-/* -------------------------------------------------------------------------- */
-
 ipcMain.handle('mpv:available', () => {
   const mpvPath = findMpv();
   const ytdlpPath = findYtDlp();
@@ -1059,10 +1069,6 @@ ipcMain.handle('mpv:available', () => {
     ytdlp: !!ytdlpPath
   };
 });
-
-/* -------------------------------------------------------------------------- */
-/* IPC - playback                                                             */
-/* -------------------------------------------------------------------------- */
 
 ipcMain.handle('mpv:playExternal', async (_event, opts) => {
   const options = opts && typeof opts === 'object' && !Array.isArray(opts) ? opts : {};
@@ -1083,7 +1089,7 @@ ipcMain.handle('mpv:playExternal', async (_event, opts) => {
 
   if (options.hwdec) extra.push('--hwdec=' + options.hwdec);
   if (options.perf === 'low') {
-    extra.push('--profile=fast', '--scale=bilinear', '--vd-lavc-threads=2');
+    extra.push('--profile=fast', '--scale=bilinear', '--vd-lavc-threads=2', '--hwdec=no');
   }
 
   return playWithMpvEmbedded(files, quality, embed, extra);
@@ -1100,7 +1106,7 @@ ipcMain.handle('mpv:playUrl', async (_event, { url, quality, embed } = {}) => {
   if (needsYtdlp && !findYtDlp()) {
     return {
       ok: false,
-      error: 'yt-dlp required for YouTube. Download yt-dlp.exe and place it next to ZephyrPlayer.\nhttps://github.com/yt-dlp/yt-dlp/releases'
+      error: 'yt-dlp required for YouTube. Place yt-dlp.exe next to ZephyrPlayer.\nhttps://github.com/yt-dlp/yt-dlp/releases'
     };
   }
 
@@ -1120,10 +1126,6 @@ ipcMain.handle('mpv:setQuality', async (_event, quality) => {
   return playWithMpvEmbeddedTracked(lastPlay.inputs, lastPlay.quality, lastPlay.embed, lastPlay.extraArgs);
 });
 
-/* -------------------------------------------------------------------------- */
-/* IPC - video adjustments                                                    */
-/* -------------------------------------------------------------------------- */
-
 ipcMain.handle('mpv:applyVideoAdj', async (_event, adj) => {
   const extra = [];
   if (adj) {
@@ -1137,10 +1139,6 @@ ipcMain.handle('mpv:applyVideoAdj', async (_event, adj) => {
     /^--brightness=/, /^--contrast=/, /^--saturation=/, /^--gamma=/, /^--hue=/
   ]);
 });
-
-/* -------------------------------------------------------------------------- */
-/* IPC - equalizer                                                            */
-/* -------------------------------------------------------------------------- */
 
 ipcMain.handle('mpv:applyEq', async (_event, eq) => {
   const extra = [];
@@ -1168,10 +1166,6 @@ ipcMain.handle('mpv:applyEq', async (_event, eq) => {
   return replayWithExtraArgs(extra, [/^--af=/]);
 });
 
-/* -------------------------------------------------------------------------- */
-/* IPC - frame step                                                           */
-/* -------------------------------------------------------------------------- */
-
 ipcMain.handle('mpv:frameStep', async (_event, dir) => {
   try {
     if (mpv.isReady()) {
@@ -1188,10 +1182,6 @@ ipcMain.handle('mpv:frameStep', async (_event, dir) => {
   return { ok: false, error: 'Frame step needs active mpv IPC session' };
 });
 
-/* -------------------------------------------------------------------------- */
-/* IPC - media info                                                           */
-/* -------------------------------------------------------------------------- */
-
 ipcMain.handle('mpv:getMediaInfo', async () => {
   return {
     ok: true,
@@ -1206,10 +1196,6 @@ ipcMain.handle('mpv:getMediaInfo', async () => {
     }
   };
 });
-
-/* -------------------------------------------------------------------------- */
-/* IPC - tracks                                                               */
-/* -------------------------------------------------------------------------- */
 
 ipcMain.handle('mpv:setTracks', async (_event, opts) => {
   const extra = [];
@@ -1229,10 +1215,6 @@ ipcMain.handle('mpv:setTracks', async (_event, opts) => {
     /^--aid=/, /^--sid=/, /^--sub-delay=/, /^--sub-scale=/
   ]);
 });
-
-/* -------------------------------------------------------------------------- */
-/* IPC - geometry                                                             */
-/* -------------------------------------------------------------------------- */
 
 ipcMain.handle('mpv:applyGeometry', async (_event, geo) => {
   const extra = [];
@@ -1265,10 +1247,6 @@ ipcMain.handle('mpv:applyGeometry', async (_event, geo) => {
     /^--panscan=/, /^--tone-mapping=/, /^--hdr-compute-peak=/
   ]);
 });
-
-/* -------------------------------------------------------------------------- */
-/* IPC - audio devices                                                        */
-/* -------------------------------------------------------------------------- */
 
 ipcMain.handle('mpv:listAudioDevices', async () => {
   const mpvPath = findMpv();
@@ -1320,10 +1298,6 @@ ipcMain.handle('mpv:setAudioDevice', async (_event, deviceId) => {
   return replayWithExtraArgs(extra, [/^--audio-device=/]);
 });
 
-/* -------------------------------------------------------------------------- */
-/* IPC - shell                                                                */
-/* -------------------------------------------------------------------------- */
-
 ipcMain.handle('shell:openExternal', async (_event, url) => {
   if (!url) return { ok: false };
   try {
@@ -1333,10 +1307,6 @@ ipcMain.handle('shell:openExternal', async (_event, url) => {
     return { ok: false, error: e.message };
   }
 });
-
-/* -------------------------------------------------------------------------- */
-/* IPC - embedding                                                            */
-/* -------------------------------------------------------------------------- */
 
 ipcMain.handle('mpv:setEmbedMode', async (_event, mode) => {
   const allowed = new Set(['sync', 'wid', 'off']);
@@ -1431,7 +1401,7 @@ function createTray() {
 }
 
 /* -------------------------------------------------------------------------- */
-/* IPC - playlists                                                            */
+/* Playlists                                                                  */
 /* -------------------------------------------------------------------------- */
 
 ipcMain.handle('playlist:saveM3u', async (_event, entries) => {
@@ -1508,7 +1478,7 @@ ipcMain.handle('playlist:loadM3u', async () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* IPC - subtitles / Whisper                                                  */
+/* Subtitles / Whisper                                                        */
 /* -------------------------------------------------------------------------- */
 
 ipcMain.handle('subtitles:detectWhisper', async () => {
@@ -1537,10 +1507,7 @@ function extractWavForWhisper(mediaPath, wavOutPath) {
   return new Promise((resolve, reject) => {
     const ffmpegPath = findFfmpeg();
     if (!ffmpegPath) {
-      reject(new Error(
-        'ffmpeg.exe not found (expected in ffmpeg/ffmpeg.exe next to ZephyrPlayer). ' +
-        'Needed to convert media to WAV for subtitle generation.'
-      ));
+      reject(new Error('ffmpeg.exe not found'));
       return;
     }
 
@@ -1567,7 +1534,7 @@ function extractWavForWhisper(mediaPath, wavOutPath) {
       if (code === 0 && fileExists(wavOutPath)) {
         resolve(wavOutPath);
       } else {
-        reject(new Error('ffmpeg failed to extract audio (code ' + code + '): ' + stderr.slice(-500)));
+        reject(new Error('ffmpeg failed (code ' + code + '): ' + stderr.slice(-500)));
       }
     });
   });
@@ -1582,7 +1549,7 @@ ipcMain.handle('subtitles:generateLocal', async (_event, { mediaPath, model } = 
   if (!whisper) {
     return {
       ok: false,
-      error: 'whisper-cli.exe not found. Place whisper.cpp build next to ZephyrPlayer for local speech-to-text.'
+      error: 'whisper-cli.exe not found'
     };
   }
 
@@ -1593,13 +1560,14 @@ ipcMain.handle('subtitles:generateLocal', async (_event, { mediaPath, model } = 
 
   const base = path.join(outDir, path.basename(mediaPath, path.extname(mediaPath)));
   const modelName = model || 'base';
-
-  // Models can be in extraResources or next to the app
   const modelPath = path.join(getResourcePath('models'), 'ggml-' + modelName + '.bin');
 
   const args = [];
   if (fileExists(modelPath)) {
     args.push('-m', modelPath);
+    log('Using Whisper model:', modelPath);
+  } else {
+    log('Whisper model not found at:', modelPath);
   }
 
   let whisperInput = mediaPath;
@@ -1651,15 +1619,14 @@ ipcMain.handle('subtitles:generateLocal', async (_event, { mediaPath, model } = 
 
       resolve({
         ok: false,
-        error: 'Whisper finished but no SRT found. Ensure model file exists in models/ggml-' +
-          modelName + '.bin. ' + (stderr || '')
+        error: 'Whisper finished but no SRT found. Model: ' + modelPath + ' | ' + (stderr || '')
       });
     });
   });
 });
 
 /* -------------------------------------------------------------------------- */
-/* IPC - history                                                              */
+/* History / Progress                                                         */
 /* -------------------------------------------------------------------------- */
 
 ipcMain.handle('history:clear', async () => ({ ok: true }));
@@ -1668,10 +1635,6 @@ ipcMain.handle('history:recordOpened', async (_event, filePath) => {
   recordRecentFile(filePath);
   return { ok: true };
 });
-
-/* -------------------------------------------------------------------------- */
-/* IPC - native taskbar progress                                             */
-/* -------------------------------------------------------------------------- */
 
 ipcMain.handle('player:reportProgress', async (_event, fraction) => {
   try {
@@ -1684,7 +1647,7 @@ ipcMain.handle('player:reportProgress', async (_event, fraction) => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* IPC - record / convert (via bundled ffmpeg)                               */
+/* Recording / Convert                                                        */
 /* -------------------------------------------------------------------------- */
 
 ipcMain.handle('media:startRecording', async (_event, { url } = {}) => {
@@ -1693,7 +1656,7 @@ ipcMain.handle('media:startRecording', async (_event, { url } = {}) => {
 
   const ffmpegPath = findFfmpeg();
   if (!ffmpegPath) {
-    return { ok: false, error: 'ffmpeg.exe not found (expected in ffmpeg/ffmpeg.exe next to ZephyrPlayer).' };
+    return { ok: false, error: 'ffmpeg.exe not found' };
   }
 
   const result = await dialog.showSaveDialog(mainWindow, {
@@ -1747,7 +1710,7 @@ ipcMain.handle('media:convertToMp4', async (_event, inputPath) => {
 
   const ffmpegPath = findFfmpeg();
   if (!ffmpegPath) {
-    return { ok: false, error: 'ffmpeg.exe not found (expected in ffmpeg/ffmpeg.exe next to ZephyrPlayer).' };
+    return { ok: false, error: 'ffmpeg.exe not found' };
   }
 
   const result = await dialog.showSaveDialog(mainWindow, {
@@ -1797,7 +1760,7 @@ ipcMain.handle('media:extractAudio', async (_event, inputPath) => {
 
   const ffmpegPath = findFfmpeg();
   if (!ffmpegPath) {
-    return { ok: false, error: 'ffmpeg.exe not found (expected in ffmpeg/ffmpeg.exe next to ZephyrPlayer).' };
+    return { ok: false, error: 'ffmpeg.exe not found' };
   }
 
   const result = await dialog.showSaveDialog(mainWindow, {
@@ -1838,7 +1801,7 @@ ipcMain.handle('media:extractAudio', async (_event, inputPath) => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* IPC - library scan                                                         */
+/* Library scan                                                               */
 /* -------------------------------------------------------------------------- */
 
 ipcMain.handle('library:scanFolder', async () => {
@@ -1898,7 +1861,7 @@ ipcMain.handle('library:scanFolder', async () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* File association export                                                    */
+/* File associations                                                          */
 /* -------------------------------------------------------------------------- */
 
 function getAssociationExecutable() {
@@ -1907,7 +1870,7 @@ function getAssociationExecutable() {
 
 ipcMain.handle('assoc:exportReg', async () => {
   if (process.platform !== 'win32') {
-    return { ok: false, error: 'Windows file associations are only supported on Windows.' };
+    return { ok: false, error: 'Windows only' };
   }
 
   const exe = getAssociationExecutable().replace(/\\/g, '\\\\');
@@ -1962,10 +1925,6 @@ ipcMain.handle('shell:openDefaults', async () => {
   }
 });
 
-/* -------------------------------------------------------------------------- */
-/* IPC - application info                                                     */
-/* -------------------------------------------------------------------------- */
-
 ipcMain.handle('app:getInfo', async () => ({
   version: app.getVersion(),
   name: app.getName(),
@@ -1989,7 +1948,6 @@ app.whenReady().then(() => {
   createMenu();
   createTray();
 
-  // Auto-update check after 4 seconds (only in packaged builds)
   setTimeout(setupAutoUpdate, 4000);
 
   app.on('activate', () => {

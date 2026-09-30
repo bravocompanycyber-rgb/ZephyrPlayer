@@ -233,23 +233,28 @@
   </div>
 
   <!-- URL / YouTube panel -->
-  <div class="settings-panel" id="urlPanel" hidden>
-    <div class="settings-header">
-      <h3>Open URL / YouTube</h3>
-      <button class="icon-btn" id="closeUrlPanel">✕</button>
-    </div>
-    <div class="settings-body">
-      <label class="setting-row" style="flex-direction:column;align-items:stretch;gap:8px;">
-        <span>Paste link (YouTube, direct video URL, etc.)</span>
-        <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-family:inherit;" />
-      </label>
-      <p class="settings-note">Requires <b>mpv</b> + <b>yt-dlp</b> for YouTube. Direct video links work with mpv alone.</p>
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
-        <button class="btn btn-ghost" id="cancelUrlBtn">Cancel</button>
-        <button class="btn btn-primary" id="playUrlBtn">Play</button>
+<div class="settings-panel" id="urlPanel" hidden>
+  <div class="settings-header">
+    <h3>Open URL / YouTube</h3>
+    <button class="icon-btn" id="closeUrlPanel">✕</button>
+  </div>
+  <div class="settings-body">
+    <label class="setting-row" style="flex-direction:column;align-items:stretch;gap:8px;">
+      <span>Paste link (YouTube, direct video URL, etc.)</span>
+      <div style="display:flex;gap:8px;">
+        <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." 
+          style="flex:1;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-family:inherit;"
+          autocomplete="off" />
+        <button class="btn btn-ghost" id="pasteUrlBtn" title="Paste from clipboard">Paste</button>
       </div>
+    </label>
+
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
+      <button class="btn btn-ghost" id="cancelUrlBtn">Cancel</button>
+      <button class="btn btn-primary" id="playUrlBtn">Play</button>
     </div>
   </div>
+</div>
 
   
   <!-- Video adjustments -->
@@ -629,5 +634,17 @@
   </div>
 
   <script src="js/player.js"></script>
+  <script>
+  // Force enable right-click paste on URL input
+  document.addEventListener('DOMContentLoaded', () => {
+    const urlInput = document.getElementById('urlInput');
+    if (urlInput) {
+      urlInput.addEventListener('contextmenu', (e) => {
+        // Allow default browser context menu
+        e.stopPropagation();
+      });
+    }
+  });
+</script>
 </body>
 </html>

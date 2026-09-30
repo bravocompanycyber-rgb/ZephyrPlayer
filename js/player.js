@@ -850,6 +850,7 @@
     });
   }
 
+   
   // Update playWithMpv to use quality + embed
 
   
@@ -2671,6 +2672,27 @@
     renderLibraryList(list, 'libraryList');
   });
 
+  function applyAssStyleLocal() {
+  const scale = (document.getElementById('assScale')?.value || 100) / 100;
+  const color = document.getElementById('assColor')?.value || '#ffffff';
+  const outline = document.getElementById('assOutline')?.value || '#000000';
+  const outlineW = document.getElementById('assOutlineW')?.value || 2;
+  const shadow = document.getElementById('assShadow')?.value || 1;
+  const back = document.getElementById('assBack')?.checked || false;
+  const bold = document.getElementById('assBold')?.checked || false;
+  const font = document.getElementById('assFont')?.value || 'Sans';
+
+  if (subtitleDisplay) {
+    subtitleDisplay.style.fontSize = (scale * 100) + '%';
+    subtitleDisplay.style.color = color;
+    subtitleDisplay.style.fontFamily = font;
+    subtitleDisplay.style.fontWeight = bold ? 'bold' : 'normal';
+    subtitleDisplay.style.textShadow = `${outlineW}px ${outlineW}px ${shadow}px ${outline}`;
+    subtitleDisplay.style.background = back ? 'rgba(0,0,0,0.6)' : 'transparent';
+    subtitleDisplay.style.padding = back ? '2px 6px' : '0';
+  }
+}
+
   // no online metadata settings
 
   const assApplyBtn = document.getElementById('assApplyBtn');
@@ -2763,5 +2785,25 @@
   if (assocBtn) assocBtn.addEventListener('click', () => openPanel('assocPanel'));
 
   refreshMpvStatus();
+
+  // ===== Paste button for URL input =====
+const pasteUrlBtn = document.getElementById('pasteUrlBtn');
+
+if (pasteUrlBtn && urlInput) {
+  pasteUrlBtn.addEventListener('click', async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text && text.trim()) {
+        urlInput.value = text.trim();
+        urlInput.focus();
+        showOSD('Link pasted');
+      } else {
+        showOSD('Clipboard is empty');
+      }
+    } catch (err) {
+      showOSD('Paste failed – use Ctrl+V');
+    }
+  });
+}
 })();
 

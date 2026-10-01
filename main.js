@@ -76,7 +76,7 @@ let recordingOutputPath = null;
 let tray = null;
 let isMini = false;
 
-let embedMode = 'sync'; // sync | wid | off
+let embedMode = 'wid'; // sync | wid | off
 let lastEmbedBounds = null;
 
 let syncIpcPath = null;
@@ -397,23 +397,28 @@ function qualityArgs(quality) {
   const q = quality || 'high';
 
   const args = [
+    // More resilient decoding
     '--hwdec=auto-copy',
     '--hwdec-codecs=all',
+    '--vd-lavc-o=threads=0',          // auto threads
+    '--framedrop=vo',                 // drop frames instead of stalling
+    '--hr-seek=yes',
+    '--hr-seek-framedrop=yes',
+    '--cache=yes',
+    '--demuxer-max-bytes=200MiB',
+    '--demuxer-max-back-bytes=100MiB',
+    '--demuxer-readahead-secs=30',
+    '--video-sync=audio',
+    '--audio-pitch-correction=yes',
+    '--keep-open=yes',
+    '--force-window=yes',
     '--vo=gpu',
     '--gpu-api=d3d11',
     '--gpu-context=d3d11',
-    '--keep-open=yes',
-    '--force-window=yes',
-    '--cache=yes',
-    '--demuxer-max-bytes=150MiB',
-    '--demuxer-max-back-bytes=75MiB',
-    '--demuxer-readahead-secs=20',
-    '--video-sync=audio',
-    '--audio-pitch-correction=yes',
     '--ytdl=yes'
   ];
 
-  // YouTube quality control based on selected preset
+  // YouTube quality
   if (q === 'fast') {
     args.push('--ytdl-format=best[height<=480]/worst');
     args.push('--scale=bilinear', '--cscale=bilinear', '--profile=fast', '--hwdec=no');
@@ -428,73 +433,30 @@ function qualityArgs(quality) {
   }
 
   if (q === 'high' || q === 'sharpen' || q === 'anime' || q === 'anime4k') {
-    args.push(
-      '--scale=ewa_lanczossharp',
-      '--cscale=ewa_lanczossharp',
-      '--dscale=mitchell',
-      '--sharpen=0.45'
-    );
+    args.push('--scale=ewa_lanczossharp', '--cscale=ewa_lanczossharp', '--dscale=mitchell', '--sharpen=0.45');
   }
-
-  if (q === 'sharpen') {
-    args.push('--sharpen=0.85');
-  }
-
+  if (q === 'sharpen') args.push('--sharpen=0.85');
   if (q === 'anime' || q === 'anime4k' || q === 'high') {
-    args.push(
-      '--deband=yes',
-      '--deband-iterations=2',
-      '--deband-threshold=64'
-    );
+    args.push('--deband=yes', '--deband-iterations=2', '--deband-threshold=64');
   }
 
   if (q === 'anime4k') {
     const shaderDir = path.join(getAppPath(), 'shaders');
-    const candidates = [
-      'Anime4K_Clamp_Highlights.glsl',
-      'Anime4K_Restore_CNN_M.glsl',
-      'Anime4K_Upscale_CNN_x2_M.glsl',
-      'Anime4K_AutoDownscalePre_x2.glsl',
-      'Anime4K_AutoDownscalePre_x4.glsl',
-      'Anime4K_Upscale_CNN_x2_S.glsl'
-    ];
-
     const found = [];
     try {
       if (fileExists(shaderDir)) {
-        for (const name of candidates) {
-          const shaderPath = path.join(shaderDir, name);
-          if (fileExists(shaderPath)) {
-            found.push(shaderPath.replace(/\\/g, '/'));
-          }
-        }
-        if (!found.length) {
-          for (const name of fs.readdirSync(shaderDir)) {
-            if (name.toLowerCase().endsWith('.glsl')) {
-              found.push(path.join(shaderDir, name).replace(/\\/g, '/'));
-            }
+        for (const name of fs.readdirSync(shaderDir)) {
+          if (name.toLowerCase().endsWith('.glsl')) {
+            found.push(path.join(shaderDir, name).replace(/\\/g, '/'));
           }
         }
       }
-    } catch (e) {
-      log('Shader scan failed:', e.message);
-    }
-
-    if (found.length) {
-      args.push('--glsl-shaders=' + found.join(';'));
-    } else {
-      args.push('--scale=ewa_lanczossharp', '--cscale=ewa_lanczossharp', '--sharpen=0.6');
-    }
+    } catch (e) { log('Shader scan failed:', e.message); }
+    if (found.length) args.push('--glsl-shaders=' + found.join(';'));
   }
 
   if (q === 'hdr') {
-    args.push(
-      '--tone-mapping=mobius',
-      '--hdr-compute-peak=yes',
-      '--target-trc=srgb',
-      '--target-prim=bt.709',
-      '--tone-mapping-mode=auto'
-    );
+    args.push('--tone-mapping=mobius', '--hdr-compute-peak=yes', '--target-trc=srgb', '--target-prim=bt.709');
   }
 
   return args;
@@ -770,7 +732,7 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
-  mainWindow.webContents.openDevTools();
+  
 
   mainWindow.on('focus', () => sendSyncMpvOntop(true));
   mainWindow.on('blur', () => sendSyncMpvOntop(false));

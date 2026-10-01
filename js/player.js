@@ -2805,5 +2805,44 @@ if (pasteUrlBtn && urlInput) {
     }
   });
 }
+
+  // ===== Fullscreen mouse + controls auto-hide =====
+  let fsHideTimer = null;
+
+  function isFullscreen() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement);
+  }
+
+  function hideFsUi() {
+    if (!isFullscreen()) return;
+    document.body.classList.add('fs-hide-ui');
+  }
+
+  function showFsUi() {
+    document.body.classList.remove('fs-hide-ui');
+    clearTimeout(fsHideTimer);
+    if (isFullscreen()) {
+      fsHideTimer = setTimeout(hideFsUi, 2200);
+    }
+  }
+
+  if (videoWrapper) {
+    videoWrapper.addEventListener('mousemove', showFsUi);
+    videoWrapper.addEventListener('mousedown', showFsUi);
+    videoWrapper.addEventListener('click', showFsUi);
+  }
+
+  document.addEventListener('fullscreenchange', () => {
+    if (isFullscreen()) {
+      showFsUi();
+    } else {
+      clearTimeout(fsHideTimer);
+      document.body.classList.remove('fs-hide-ui');
+    }
+  });
+
+  function needsMpvContainer(fullName) {
+  return /\.(ts|m2ts|mts|wmv|flv|mpg|mpeg|asf|rm|rmvb|vob|divx|mkv|avi|mov|m4v|webm)$/i.test(fullName || '');
+}
 })();
 

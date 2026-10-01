@@ -6,9 +6,6 @@
   <title>ZephyrPlayer</title>
   <link rel="stylesheet" href="css/style.css" />
   <link rel="icon" href="assets/icons/favicon.svg" type="image/svg+xml" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
 </head>
 <body>
   <div class="app">
@@ -70,22 +67,22 @@
           <p id="videoSubtitle">Open files or drop media here</p>
         </div>
         <div class="top-actions">
-          <select id="qualitySelect" class="quality-select" title="Playback quality (mpv)">
-            <option value="high">Quality: High</option>
-            <option value="sharpen">Quality: Sharpen</option>
-            <option value="anime">Quality: Anime</option>
-            <option value="anime4k">Quality: Anime4K</option>
-            <option value="hdr">Quality: HDR map</option>
-            <option value="fast">Quality: Fast</option>
-          </select>
+          <select id="qualitySelect" class="quality-select" title="Playback quality">
+  <option value="fast">Fast (480p – weak PC)</option>
+  <option value="high" selected>High (1080p)</option>
+  <option value="sharpen">Sharpen</option>
+  <option value="anime">Anime</option>
+  <option value="anime4k">Anime4K</option>
+  <option value="hdr">HDR</option>
+</select>
           <button class="icon-btn" id="miniModeBtn" title="Mini player">▬</button>
           <button class="icon-btn" id="alwaysOnTopBtn" title="Always on top">📌</button>
           <button class="icon-btn" id="settingsBtn" title="Settings">⚙</button>
-          <select id="embedSelect" class="quality-select" title="mpv embed mode">
-            <option value="sync">Embed: Synced</option>
-            <option value="wid">Embed: Full window</option>
-            <option value="off">Embed: Off</option>
-          </select>
+         <select id="embedSelect" class="quality-select" title="mpv embed mode">
+  <option value="wid" selected>Embed: Full window</option>
+  <option value="sync">Embed: Synced (floating)</option>
+  <option value="off">Embed: Separate window</option>
+</select>
           <button class="icon-btn" id="mpvPlayBtn" title="Play current with mpv (best quality)">▶ mpv</button>
           <span id="mpvStatus" style="font-size:0.7rem;color:var(--text-muted);margin-right:6px;"></span>
           <button class="icon-btn" id="themeToggle" title="Theme">🌓</button>

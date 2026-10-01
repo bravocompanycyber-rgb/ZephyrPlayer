@@ -267,3 +267,29 @@ body.skin-forest {
   font-size:0.72rem; font-weight:700; color:var(--accent); text-transform:uppercase;
   letter-spacing:0.04em; margin:10px 0 4px; padding:0 4px;
 }
+
+/* Fullscreen auto-hide */
+body.fs-hide-ui .controls,
+body.fs-hide-ui .top-bar,
+body.fs-hide-ui .sidebar {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transition: opacity 0.35s ease;
+}
+body:not(.fs-hide-ui) .controls,
+body:not(.fs-hide-ui) .top-bar {
+  opacity: 1;
+  transition: opacity 0.2s ease;
+}
+body.fs-hide-ui {
+  cursor: none;
+}
+
+
+.settings-panel {
+  max-height: min(85vh, 700px);
+  overflow-y: auto;
+  top: 50% !important;
+  left: 50% !important;
+  transform: translate(-50%, -50%) !important;
+}

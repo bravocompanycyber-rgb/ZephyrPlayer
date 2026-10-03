@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; media-src 'self' blob: file:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
   <title>ZephyrPlayer</title>
   <link rel="stylesheet" href="css/style.css" />
   <link rel="icon" href="assets/icons/favicon.svg" type="image/svg+xml" />
@@ -21,12 +22,12 @@
       </div>
 
       <div class="playlist-actions">
-        <button class="btn btn-primary" id="addFilesBtn" title="Open files (Ctrl+O)">+ Open</button>
-        <button class="btn btn-ghost" id="addUrlBtn" title="Open URL / YouTube">🔗 URL</button>
-        <button class="btn btn-ghost" id="addFolderBtn" title="Open folder">📁</button>
-        <button class="btn btn-ghost" id="savePlaylistBtn" title="Save playlist (m3u)">💾</button>
-        <button class="btn btn-ghost" id="loadPlaylistBtn" title="Load playlist (m3u)">📂</button>
-        <button class="btn btn-ghost" id="clearPlaylistBtn" title="Clear">🗑</button>
+        <button class="btn btn-primary" id="addFilesBtn" title="Open files (Ctrl+O)"><span class="zi" data-icon="file-add"></span><span class="lbl">Open</span></button>
+        <button class="btn btn-ghost" id="addUrlBtn" title="Open URL / YouTube"><span class="zi" data-icon="link"></span><span class="lbl">URL</span></button>
+        <button class="btn btn-ghost" id="addFolderBtn" title="Open folder"><span class="zi" data-icon="folder-open"></span></button>
+        <button class="btn btn-ghost" id="savePlaylistBtn" title="Save playlist (m3u)"><span class="zi" data-icon="save"></span></button>
+        <button class="btn btn-ghost" id="loadPlaylistBtn" title="Load playlist (m3u)"><span class="zi" data-icon="load"></span></button>
+        <button class="btn btn-ghost" id="clearPlaylistBtn" title="Clear playlist"><span class="zi" data-icon="trash"></span></button>
       </div>
 
       <div class="sidebar-tabs" id="sidebarTabs">
@@ -36,8 +37,21 @@
       </div>
 
       <div class="playlist-tools" id="queueTools">
-        <button class="tool-btn" id="shuffleBtn" title="Shuffle">🔀</button>
-        <button class="tool-btn" id="repeatBtn" title="Repeat: Off">🔁 Off</button>
+        <button class="tool-btn" id="shuffleBtn" title="Shuffle (plays every item once before repeating)"><span class="zi" data-icon="shuffle"></span><span class="lbl">Shuffle</span></button>
+        <button class="tool-btn" id="repeatBtn" title="Repeat: Off"><span class="zi" data-icon="repeat"></span><span class="lbl">Off</span></button>
+        <select id="plSort" class="tool-select" title="Sort the playlist">
+          <option value="">Sort…</option>
+          <option value="name">Name A→Z</option>
+          <option value="name-desc">Name Z→A</option>
+          <option value="dur">Shortest first</option>
+          <option value="dur-desc">Longest first</option>
+          <option value="size-desc">Largest first</option>
+          <option value="added">Order added</option>
+          <option value="random">Shuffle order</option>
+          <option value="dedupe">Remove duplicates</option>
+          <option value="missing">Remove missing files</option>
+        </select>
+        <div class="pl-filter"><span class="zi" data-icon="search"></span><input type="search" id="plFilter" placeholder="Filter…" spellcheck="false" /></div>
       </div>
 
       <ul class="playlist" id="playlist"></ul>
@@ -61,7 +75,7 @@
 
     <main class="player-area">
       <header class="top-bar">
-        <button class="icon-btn" id="toggleSidebar" title="Playlist">☰</button>
+        <button class="icon-btn" id="toggleSidebar" title="Playlist"><span class="zi" data-icon="sidebar"></span></button>
         <div class="title-area">
           <h1 id="videoTitle">ZephyrPlayer</h1>
           <p id="videoSubtitle">Open files or drop media here</p>
@@ -75,17 +89,16 @@
   <option value="anime4k">Anime4K</option>
   <option value="hdr">HDR</option>
 </select>
-          <button class="icon-btn" id="miniModeBtn" title="Mini player">▬</button>
-          <button class="icon-btn" id="alwaysOnTopBtn" title="Always on top">📌</button>
-          <button class="icon-btn" id="settingsBtn" title="Settings">⚙</button>
-         <select id="embedSelect" class="quality-select" title="mpv embed mode">
-  <option value="wid" selected>Embed: Full window</option>
-  <option value="sync">Embed: Synced (floating)</option>
-  <option value="off">Embed: Separate window</option>
+          <button class="icon-btn" id="miniModeBtn" title="Mini player"><span class="zi" data-icon="mini-player"></span></button>
+          <button class="icon-btn" id="alwaysOnTopBtn" title="Always on top"><span class="zi" data-icon="pin"></span></button>
+          <button class="icon-btn" id="settingsBtn" title="Settings"><span class="zi" data-icon="settings"></span></button>
+         <select id="embedSelect" class="quality-select" title="Where mpv draws video">
+  <option value="off" selected>mpv: Separate window</option>
+  <option value="child">mpv: Embedded (beta)</option>
 </select>
-          <button class="icon-btn" id="mpvPlayBtn" title="Play current with mpv (best quality)">▶ mpv</button>
+          <button class="icon-btn wide" id="mpvPlayBtn" title="Play current with mpv (best quality)"><span class="zi" data-icon="engine"></span><span class="lbl">mpv</span></button>
           <span id="mpvStatus" style="font-size:0.7rem;color:var(--text-muted);margin-right:6px;"></span>
-          <button class="icon-btn" id="themeToggle" title="Theme">🌓</button>
+          <button class="icon-btn" id="themeToggle" title="Theme"><span class="zi" data-icon="theme"></span></button>
         </div>
       </header>
 
@@ -95,7 +108,7 @@
 
         <div class="drop-zone" id="dropZone">
           <div class="drop-content">
-            <div class="drop-icon">🎬</div>
+            <div class="drop-icon"><span class="zi" data-icon="film"></span></div>
             <h2>Drop media here</h2>
             <p>Video • Audio • Subtitles (.srt / .vtt)</p>
             <div class="drop-btns">
@@ -106,7 +119,7 @@
         </div>
 
         <div class="loader" id="loader" hidden><div class="spinner"></div></div>
-        <button class="big-play" id="bigPlay" hidden>▶</button>
+        <button class="big-play" id="bigPlay" hidden><span class="zi" data-icon="play"></span></button>
         <div class="osd" id="osd" hidden></div>
       </div>
 
@@ -130,39 +143,39 @@
 
         <div class="controls-row">
           <div class="controls-left">
-            <button class="ctrl-btn" id="prevBtn" title="Previous track">|◀</button>
+            <button class="ctrl-btn" id="prevBtn" title="Previous (Shift+P)"><span class="zi" data-icon="prev"></span></button>
             <button class="ctrl-btn play-btn" id="playPauseBtn" title="Play/Pause (Space)">
-              <span class="icon-play">▶</span>
-              <span class="icon-pause" hidden>⏸</span>
+              <span class="zi icon-play" data-icon="play"></span>
+              <span class="zi icon-pause" hidden data-icon="pause"></span>
             </button>
-            <button class="ctrl-btn" id="nextBtn" title="Next track">▶|</button>
+            <button class="ctrl-btn" id="nextBtn" title="Next (Shift+N)"><span class="zi" data-icon="next"></span></button>
             <div class="volume-group">
-              <button class="ctrl-btn" id="muteBtn" title="Mute (M)">🔊</button>
+              <button class="ctrl-btn" id="muteBtn" title="Mute (M)"><span class="zi" data-icon="volume-high"></span></button>
               <input type="range" id="volumeSlider" class="volume-slider" min="0" max="1.5" step="0.01" value="1" title="Volume (up to 150%)" />
             </div>
           </div>
 
           <div class="controls-center">
-            <button class="ctrl-btn" id="rewindBtn" title="-10 seconds">−10</button>
-            <button class="ctrl-btn" id="forwardBtn" title="+10 seconds">+10</button>
-            <button class="ctrl-btn" id="abLoopBtn" title="A-B Loop">A-B</button>
-            <button class="ctrl-btn" id="screenshotBtn" title="Screenshot (S)">📷</button>
-            <button class="ctrl-btn" id="moreBtn" title="More tools">⋯</button>
+            <button class="ctrl-btn num" id="rewindBtn" title="Back 10 seconds (←)"><span class="zi" data-icon="rewind-10"></span><b class="ctrl-num">10</b></button>
+            <button class="ctrl-btn num" id="forwardBtn" title="Forward 10 seconds (→)"><span class="zi" data-icon="forward-10"></span><b class="ctrl-num">10</b></button>
+            <button class="ctrl-btn" id="abLoopBtn" title="A-B loop (A)"><span class="zi" data-icon="ab-loop"></span><b class="ctrl-tag" id="abTag" hidden>A</b></button>
+            <button class="ctrl-btn" id="screenshotBtn" title="Screenshot (S)"><span class="zi" data-icon="screenshot"></span></button>
+            <button class="ctrl-btn" id="moreBtn" title="More tools"><span class="zi" data-icon="more"></span></button>
           </div>
 
           <div class="controls-right">
-            <button class="ctrl-btn" id="subBtn" title="Subtitles">CC</button>
-            <button class="ctrl-btn" id="audioBtn" title="Audio track">🎵</button>
-            <button class="ctrl-btn" id="speedBtn" title="Speed"><span id="speedLabel">1×</span></button>
-            <button class="ctrl-btn" id="pipBtn" title="PiP">⧉</button>
-            <button class="ctrl-btn" id="fullscreenBtn" title="Fullscreen (F)">⛶</button>
+            <button class="ctrl-btn" id="subBtn" title="Subtitles"><span class="zi" data-icon="subtitles"></span></button>
+            <button class="ctrl-btn" id="audioBtn" title="Audio track"><span class="zi" data-icon="audio-track"></span></button>
+            <button class="ctrl-btn speed" id="speedBtn" title="Speed ( [ and ] )"><span class="zi" data-icon="speed"></span><span id="speedLabel">1×</span></button>
+            <button class="ctrl-btn" id="pipBtn" title="Picture-in-picture"><span class="zi" data-icon="pip"></span></button>
+            <button class="ctrl-btn" id="fullscreenBtn" title="Fullscreen (F)"><span class="zi" data-icon="fullscreen"></span></button>
           </div>
         </div>
       </div>
     </main>
   </div>
 
-  <input type="file" id="fileInput" accept="video/*,audio/*,.srt,.vtt,.ass,.ssa" multiple hidden />
+  <input type="file" id="fileInput" accept="video/*,audio/*,.mkv,.avi,.ts,.m2ts,.wmv,.flv,.srt,.vtt,.ass,.ssa" multiple hidden />
   <input type="file" id="folderInput" webkitdirectory directory multiple hidden />
   <input type="file" id="m3uInput" accept=".m3u,.m3u8,audio/x-mpegurl" hidden />
   <input type="file" id="subInput" accept=".srt,.vtt,.ass,.ssa,text/vtt" hidden />
@@ -244,6 +257,19 @@
           autocomplete="off" />
         <button class="btn btn-ghost" id="pasteUrlBtn" title="Paste from clipboard">Paste</button>
       </div>
+    </label>
+
+    <label class="setting-row" style="margin-top:10px;">
+      <span title="Needed for age-restricted / 'sign in to confirm you're not a bot' videos. Cookies are read locally by yt-dlp and never leave your PC.">Use cookies from</span>
+      <select id="ytCookies" style="padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);">
+        <option value="">No browser</option>
+        <option value="chrome">Chrome</option>
+        <option value="edge">Edge</option>
+        <option value="firefox">Firefox</option>
+        <option value="brave">Brave</option>
+        <option value="opera">Opera</option>
+        <option value="vivaldi">Vivaldi</option>
+      </select>
     </label>
 
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
@@ -630,18 +656,9 @@
     </div>
   </div>
 
+  <script src="js/subtitle-parser.js"></script>
+  <script src="js/icons-default.js"></script>
+  <script src="js/icons.js"></script>
   <script src="js/player.js"></script>
-  <script>
-  // Force enable right-click paste on URL input
-  document.addEventListener('DOMContentLoaded', () => {
-    const urlInput = document.getElementById('urlInput');
-    if (urlInput) {
-      urlInput.addEventListener('contextmenu', (e) => {
-        // Allow default browser context menu
-        e.stopPropagation();
-      });
-    }
-  });
-</script>
 </body>
 </html>

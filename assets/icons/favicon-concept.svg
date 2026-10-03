@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0f2a3d"/><stop offset="1" stop-color="#0b0f14"/></linearGradient>
+    <linearGradient id="ac" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5eead4"/><stop offset="1" stop-color="#38bdf8"/></linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- wind lines forming a Z -->
+  <path d="M120 150h232c34 0 34 52 0 52h-60" fill="none" stroke="url(#ac)" stroke-width="30" stroke-linecap="round" opacity=".55"/>
+  <path d="M392 362H160c-34 0-34-52 0-52h60" fill="none" stroke="url(#ac)" stroke-width="30" stroke-linecap="round" opacity=".55"/>
+  <!-- play triangle -->
+  <path d="M214 196v120c0 12 13 19 23 13l98-60c9-6 9-20 0-26l-98-60c-10-6-23 1-23 13z" fill="url(#ac)"/>
+</svg>

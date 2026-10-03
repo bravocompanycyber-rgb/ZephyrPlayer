@@ -1,57 +1,97 @@
-const { contextBridge, ipcRenderer } = require('electron');
+'use strict';
+/**
+ * ZephyrPlayer preload (sandboxed). Exposes a small, explicit API to the UI.
+ * Event subscriptions return an unsubscribe function.
+ */
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
+
+const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args);
+
+function on(channel, cb) {
+  if (typeof cb !== 'function') return () => {};
+  const handler = (_event, ...args) => { try { cb(...args); } catch (e) { console.error('[preload] listener error on ' + channel, e); } };
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.removeListener(channel, handler);
+}
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  openFiles: () => ipcRenderer.invoke('dialog:openFiles'),
-  openFolder: () => ipcRenderer.invoke('dialog:openFolder'),
-  onOpenFiles: (callback) => ipcRenderer.on('open-files', (_e, paths) => callback(paths)),
-  onOpenFilesMpv: (callback) => ipcRenderer.on('open-files-mpv', (_e, paths) => callback(paths)),
-  setAlwaysOnTop: () => ipcRenderer.invoke('window:setAlwaysOnTop'),
-  setMini: (mini) => ipcRenderer.invoke('window:setMini', mini),
-  hideToTray: () => ipcRenderer.invoke('window:hideToTray'),
-  saveM3u: (entries) => ipcRenderer.invoke('playlist:saveM3u', entries),
-  loadM3u: () => ipcRenderer.invoke('playlist:loadM3u'),
+  /* files & dialogs */
+  openFiles: () => invoke('dialog:openFiles'),
+  openFolder: () => invoke('dialog:openFolder'),
+  expandPaths: (paths) => invoke('files:expand', paths),
+  sidecarSubs: (mediaPath) => invoke('files:sidecarSubs', mediaPath),
+  readSubtitle: (filePath) => invoke('files:readSubtitle', filePath),
+  getPathForFile: (file) => {
+    try { if (webUtils && webUtils.getPathForFile) return webUtils.getPathForFile(file) || ''; } catch {}
+    try { return (file && file.path) || ''; } catch { return ''; }
+  },
+  saveM3u: (entries) => invoke('playlist:saveM3u', entries),
+  loadM3u: () => invoke('playlist:loadM3u'),
+  scanLibraryFolder: () => invoke('library:scanFolder'),
+  recordOpened: (p) => invoke('history:recordOpened', p),
+  reportProgress: (fraction) => invoke('player:reportProgress', fraction),
 
-  mpvAvailable: () => ipcRenderer.invoke('mpv:available'),
-  mpvPlayExternal: (opts, quality, embed) =>
-    ipcRenderer.invoke('mpv:playExternal', typeof opts === 'object' && !Array.isArray(opts) ? opts : { files: opts, quality, embed }),
-  mpvPlayUrl: (url, quality, embed) =>
-    ipcRenderer.invoke('mpv:playUrl', { url, quality, embed }),
-  mpvStop: () => ipcRenderer.invoke('mpv:stop'),
-  mpvSetQuality: (quality) => ipcRenderer.invoke('mpv:setQuality', quality),
-  mpvApplyVideoAdj: (adj) => ipcRenderer.invoke('mpv:applyVideoAdj', adj),
-  mpvApplyEq: (eq) => ipcRenderer.invoke('mpv:applyEq', eq),
-  mpvFrameStep: (dir) => ipcRenderer.invoke('mpv:frameStep', dir),
-  mpvGetMediaInfo: () => ipcRenderer.invoke('mpv:getMediaInfo'),
-  mpvSetTracks: (opts) => ipcRenderer.invoke('mpv:setTracks', opts),
-  mpvApplyGeometry: (geo) => ipcRenderer.invoke('mpv:applyGeometry', geo),
-  listAudioDevices: () => ipcRenderer.invoke('mpv:listAudioDevices'),
-  setAudioDevice: (id) => ipcRenderer.invoke('mpv:setAudioDevice', id),
-  openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
-  setEmbedMode: (mode) => ipcRenderer.invoke('mpv:setEmbedMode', mode),
-  setEmbedBounds: (bounds) => ipcRenderer.invoke('mpv:setEmbedBounds', bounds),
-  getEmbedMode: () => ipcRenderer.invoke('mpv:getEmbedMode'),
-  detectWhisper: () => ipcRenderer.invoke('subtitles:detectWhisper'),
-  generateLocalSubs: (mediaPath, model) => ipcRenderer.invoke('subtitles:generateLocal', { mediaPath, model }),
-  getAppInfo: () => ipcRenderer.invoke('app:getInfo'),
-  saveSrt: (content, defaultName) => ipcRenderer.invoke('subtitles:saveSrt', { content, defaultName }),
-  clearHistory: () => ipcRenderer.invoke('history:clear'),
-  scanLibraryFolder: () => ipcRenderer.invoke('library:scanFolder'),
-  exportAssocReg: () => ipcRenderer.invoke('assoc:exportReg'),
-  openDefaultApps: () => ipcRenderer.invoke('shell:openDefaults'),
+  /* window */
+  setAlwaysOnTop: () => invoke('window:setAlwaysOnTop'),
+  setMini: (mini) => invoke('window:setMini', !!mini),
+  hideToTray: () => invoke('window:hideToTray'),
+  capturePage: (rect) => invoke('capture:page', rect),
+  openExternal: (url) => invoke('shell:openExternal', url),
+  getAppInfo: () => invoke('app:getInfo'),
+  exportAssocReg: () => invoke('assoc:exportReg'),
+  openDefaultApps: () => invoke('shell:openDefaults'),
 
-  onMpvStatus: (callback) => ipcRenderer.on('mpv-status', (_e, status) => callback(status)),
-  onMpvProcessError: (callback) => ipcRenderer.on('mpv-process-error', (_e, info) => callback(info)),
-  onHotkey: (callback) => ipcRenderer.on('hotkey', (_e, key) => callback(key)),
+  /* mpv engine */
+  mpvAvailable: () => invoke('mpv:available'),
+  mpvPlayExternal: (opts) => invoke('mpv:playExternal', opts),
+  mpvLoad: (file, startPos) => invoke('mpv:loadFile', file, startPos),
+  mpvPlayUrl: (url, quality, embed, extra) => invoke('mpv:playUrl', Object.assign({}, extra, { url, quality, embed })),
+  mpvStop: () => invoke('mpv:stop'),
+  mpvSetQuality: (q) => invoke('mpv:setQuality', q),
+  mpvApplyVideoAdj: (adj) => invoke('mpv:applyVideoAdj', adj),
+  mpvApplyEq: (eq) => invoke('mpv:applyEq', eq),
+  mpvApplyGeometry: (geo) => invoke('mpv:applyGeometry', geo),
+  mpvFrameStep: (dir) => invoke('mpv:frameStep', dir),
+  mpvGetMediaInfo: () => invoke('mpv:getMediaInfo'),
+  mpvSetTracks: (opts) => invoke('mpv:setTracks', opts),
+  mpvSetProps: (map) => invoke('mpv:setProps', map),
+  mpvCommand: (name, args) => invoke('mpv:command', name, args),
+  mpvGetState: () => invoke('mpv:getState'),
+  updateYtDlp: () => invoke('ytdlp:update'),
+  ytdlpPlaylist: (url, cookies) => invoke('ytdlp:playlist', url, cookies),
+  probeMedia: (file) => invoke('media:probe', file),
+  thumbMedia: (file, duration) => invoke('media:thumb', file, duration),
+  getIcons: () => invoke('icons:getAll'),
+  openIconsFolder: () => invoke('icons:openFolder'),
+  listAudioDevices: () => invoke('mpv:listAudioDevices'),
+  setAudioDevice: (id) => invoke('mpv:setAudioDevice', id),
+  setEmbedMode: (mode) => invoke('mpv:setEmbedMode', mode),
+  getEmbedMode: () => invoke('mpv:getEmbedMode'),
+  setEmbedBounds: (b) => invoke('mpv:setEmbedBounds', b),
+  setEmbedSuspended: (flag) => invoke('mpv:setEmbedSuspended', !!flag),
 
-  reportProgress: (fraction) => ipcRenderer.invoke('player:reportProgress', fraction),
-  recordOpened: (filePath) => ipcRenderer.invoke('history:recordOpened', filePath),
+  /* subtitles */
+  detectWhisper: () => invoke('subtitles:detectWhisper'),
+  generateLocalSubs: (mediaPath, model) => invoke('subtitles:generateLocal', { mediaPath, model }),
+  cancelLocalSubs: () => invoke('subtitles:cancel'),
+  saveSrt: (content, defaultName) => invoke('subtitles:saveSrt', { content, defaultName }),
 
-  startRecording: (url) => ipcRenderer.invoke('media:startRecording', { url }),
-  stopRecording: () => ipcRenderer.invoke('media:stopRecording'),
-  convertToMp4: (inputPath) => ipcRenderer.invoke('media:convertToMp4', inputPath),
-  extractAudio: (inputPath) => ipcRenderer.invoke('media:extractAudio', inputPath),
-  onRecordingStatus: (callback) => ipcRenderer.on('recording-status', (_e, status) => callback(status)),
+  /* recording / conversion */
+  startRecording: (url) => invoke('media:startRecording', { url }),
+  stopRecording: () => invoke('media:stopRecording'),
+  convertToMp4: (p) => invoke('media:convertToMp4', p),
+  extractAudio: (p) => invoke('media:extractAudio', p),
 
-  onUpdateStatus: (callback) => ipcRenderer.on('update-status', (_e, status) => callback(status))
+  /* events from the main process */
+  onOpenFiles: (cb) => on('open-files', cb),
+  onOpenFilesMpv: (cb) => on('open-files-mpv', cb),
+  onMpvStatus: (cb) => on('mpv-status', cb),
+  onMpvProcessError: (cb) => on('mpv-process-error', cb),
+  onMpvState: (cb) => on('mpv-state', cb),
+  onMpvEvent: (cb) => on('mpv-event', cb),
+  onHotkey: (cb) => on('hotkey', cb),
+  onRecordingStatus: (cb) => on('recording-status', cb),
+  onUpdateStatus: (cb) => on('update-status', cb),
+  onSubtitleProgress: (cb) => on('subtitles-progress', cb),
+  onWindowState: (cb) => on('window-state', cb)
 });
-

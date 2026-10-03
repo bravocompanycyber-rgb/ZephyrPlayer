@@ -99,342 +99,978 @@
     osd.hidden = false;
     clearTimeout(osdTimer);
     osdTimer = setTimeout(() => osd.hidden = true, ms);
+    // the DOM sits under a native mpv window, so mirror the message into mpv's own OSD
+    if (typeof engine !== 'undefined' && engine === 'mpv' && window.electronAPI && window.electronAPI.mpvCommand) {
+      window.electronAPI.mpvCommand('show-text', [String(text), ms]).catch(() => {});
+    }
   }
 
-  // Playlist
-  function addFiles(files) {
-    const media = Array.from(files).filter(f => {
-      const name = f.name || f.path || '';
-      return (f.type && (f.type.startsWith('video/') || f.type.startsWith('audio/'))) ||
-        /\.(mp4|webm|mkv|avi|mov|m4v|wmv|flv|ts|m2ts|mpg|mpeg|3gp|ogv|ogg|mp3|flac|wav|aac|m4a|opus|wma)$/i.test(name) ||
-        (!!f.path && !/\.(srt|vtt|ass|ssa|txt|jpg|png|json)$/i.test(name));
-    });
-    const subs = Array.from(files).filter(f => /\.(srt|vtt|ass|ssa)$/i.test(f.name || f.path || ''));
+  /* ====================================================================== */
+  /*  Engine core: HTML5 <video> + mpv (IPC-controlled), playlist, subtitles  */
+  /* ====================================================================== */
+  const api = () => window.electronAPI || null;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+  function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
+  function lsDel(k) { try { localStorage.removeItem(k); } catch {} }
+  function posKey(item) { return 'zephyr-pos2-' + ((item && (item.path || item.url || item.fullName)) || ''); }
 
-    media.forEach(file => {
-      let url, name, fullName, size;
-      if (file.path) {
-        fullName = file.path.split(/[/\\]/).pop();
-        name = fullName.replace(/\.[^/.]+$/, '');
-        url = pathToFileUrl(file.path);
-        size = file.size || 0;
-      } else {
-        fullName = file.name;
-        name = file.name.replace(/\.[^/.]+$/, '');
-        url = URL.createObjectURL(file);
-        size = file.size;
-      }
-      playlist.push({ name, fullName, url, size, type: file.type || '', path: file.path || null });
-    });
+  // Containers/codecs the browser engine cannot do (or does poorly: no embedded subs / multi-audio) -> mpv first.
+  const MPV_PREFERRED = /\.(mkv|avi|ts|m2ts|mts|wmv|flv|mpg|mpeg|m2v|asf|rm|rmvb|vob|divx|ogm|mxf|f4v|ape|wv|mka|ac3|eac3|dts|amr|mpc|tta)$/i;
+  const VIDEO_EXT = /\.(mp4|m4v|mkv|webm|mov|avi|wmv|flv|ts|m2ts|mts|mpg|mpeg|m2v|3gp|3g2|ogv|ogm|vob|asf|divx|f4v|rm|rmvb)$/i;
+  function needsMpvContainer(fullName) { return MPV_PREFERRED.test(fullName || ''); }
 
-    if (subs.length && playlist.length) {
-      externalSubs = subs;
-      loadExternalSub(subs[0]);
+  // Which engine is active, and the mirrored mpv state (driven by IPC events from the main process).
+  let engine = 'html5';          // 'html5' | 'mpv'
+  let mpvMode = 'off';           // embed mode actually in use
+  let loadToken = 0;             // invalidates stale async work when the user switches items quickly
+  let errorStreak = 0;
+  let volumeLevel = 1;
+  let userMuted = false;
+  let speedRate = 1;
+  const mp = { active: false, time: 0, duration: 0, paused: true, eof: false, tracks: [] };
+
+  const isMpv = () => engine === 'mpv';
+  const curTime = () => (isMpv() ? mp.time : (video.currentTime || 0));
+  const curDur = () => { const d = isMpv() ? mp.duration : video.duration; return isFinite(d) && d > 0 ? d : 0; };
+  const hasMedia = () => (isMpv() ? mp.active : !!video.getAttribute('src'));
+
+  function mpvCmd(name, ...args) {
+    const a = api();
+    if (!a || !a.mpvCommand) return Promise.resolve({ ok: false });
+    return a.mpvCommand(name, args).catch(() => ({ ok: false }));
+  }
+  function mpvSet(name, value) {
+    const a = api();
+    if (!a || !a.mpvSetProps) return Promise.resolve({ ok: false });
+    return a.mpvSetProps({ [name]: value }).catch(() => ({ ok: false }));
+  }
+
+  const history = [];   // items (not indices) so reordering/sorting can never break "previous"
+  const playedSet = new Set();   // shuffle: items already played in the current cycle
+  const plFilterEl = document.getElementById('plFilter');
+  const plSortEl = document.getElementById('plSort');
+  let plFilter = '';
+  let dragItem = null;
+
+  const BROWSER_V = new Set(['h264', 'vp8', 'vp9', 'av1', 'theora']);
+  const BROWSER_A = new Set(['aac', 'mp3', 'opus', 'vorbis', 'flac', 'pcm_s16le', 'pcm_s24le', 'pcm_u8', 'pcm_f32le']);
+  // Does the browser engine decode this? (HEVC/x265, AC3/DTS, MPEG-2, VC-1... it does not -> mpv straight away)
+  function browserCanPlay(info) {
+    if (!info) return true;
+    if (info.vcodec && info.hasVideo && !BROWSER_V.has(info.vcodec)) return false;
+    if (info.acodec && !BROWSER_A.has(info.acodec)) return false;
+    if (info.bitDepth > 8 && info.hasVideo) return false;       // 10-bit H.264 is not hardware/browser friendly
+    return true;
+  }
+  const itemDuration = (it) => (it.info && it.info.duration) || it.duration || 0;
+
+  function makeItem(m) {
+    const fullName = m.name || String(m.path).split(/[/\\]/).pop();
+    return {
+      name: m.title || fullName.replace(/\.[^/.]+$/, ''), fullName, size: m.size || 0, type: '',
+      path: m.path, url: pathToFileUrl(m.path), subPath: m.subPath || null, addedAt: Date.now()
+    };
+  }
+  function makeStreamItem(url, title, duration) {
+    const label = title || (url.length > 70 ? url.slice(0, 67) + '…' : url);
+    return { name: label, fullName: url, size: 0, type: '', path: null, url, stream: true, duration: duration || 0, addedAt: Date.now() };
+  }
+
+  // ------------------------------------------------------- probing (duration, codecs, tracks, posters)
+  let pActive = 0; const pQueue = [];
+  function limited(fn, max) {
+    return new Promise((resolve) => {
+      const run = () => { pActive++; fn().catch(() => null).then((r) => { pActive--; resolve(r); const n = pQueue.shift(); if (n) n(); }); };
+      if (pActive < max) run(); else pQueue.push(run);
+    });
+  }
+  function applyInfo(item, info) {
+    item.info = info;
+    if (!item.size && info.size) item.size = info.size;
+    if (!browserCanPlay(info)) item.forceMpv = true;
+    if (!info.hasVideo && info.title && !item._renamed) {
+      item.name = (info.artist ? info.artist + ' – ' : '') + info.title;      // music: tags beat file names
     }
+    updateRow(item);
+    if (playlist[currentIndex] === item) { videoTitle.textContent = item.name; }
+    savePlaylistSoon();
+  }
+  function probeItem(item) {
+    const a = api();
+    if (item.info) return Promise.resolve(item.info);
+    if (item._probe) return item._probe;
+    if (!item.path || !a || !a.probeMedia) return Promise.resolve(null);
+    item._probe = limited(async () => {
+      const info = await a.probeMedia(item.path);
+      if (info && info.ok) applyInfo(item, info);
+      else if (info && info.error === 'missing') { item.missing = true; updateRow(item); }
+      return item.info || null;
+    }, 4).then((r) => { item._probe = null; return r; });
+    return item._probe;
+  }
+  let tActive = 0; const tQueue = [];
+  function queueThumb(item) {
+    const a = api();
+    if (item.thumb || item._thumbing || !item.path || !a || !a.thumbMedia || !(item.info && item.info.hasVideo)) return;
+    item._thumbing = true;
+    const run = async () => {
+      tActive++;
+      try {
+        const r = await a.thumbMedia(item.path, itemDuration(item));
+        if (r && r.ok && r.path) { item.thumb = pathToFileUrl(r.path); updateRow(item); }
+      } catch {}
+      tActive--; item._thumbing = false;
+      const n = tQueue.shift(); if (n) n();
+    };
+    if (tActive < 2) run(); else tQueue.push(run);
+  }
+  const thumbObserver = typeof IntersectionObserver !== 'undefined'
+    ? new IntersectionObserver((entries) => entries.forEach((en) => {
+      if (en.isIntersecting && en.target._item) { thumbObserver.unobserve(en.target); queueThumb(en.target._item); }
+    }), { root: playlistEl, rootMargin: '240px' })
+    : null;
 
+  // ------------------------------------------------------- playlist persistence (restored on next launch)
+  let saveTimer = null;
+  function savePlaylistSoon() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      try {
+        const cur = playlist[currentIndex];
+        lsSet('zephyr-playlist-v1', JSON.stringify({
+          cur: cur ? (cur.path || cur.url) : null,
+          items: playlist.slice(0, 1500).map((it) => ({ p: it.path || null, u: it.stream ? it.url : null, n: it.name, d: Math.round(itemDuration(it)) }))
+        }));
+      } catch {}
+    }, 600);
+  }
+  function restorePlaylist() {
+    let saved;
+    try { saved = JSON.parse(lsGet('zephyr-playlist-v1') || 'null'); } catch { saved = null; }
+    if (!saved || !Array.isArray(saved.items) || !saved.items.length || playlist.length) return;
+    for (const s of saved.items) {
+      if (s.u) playlist.push(makeStreamItem(s.u, s.n, s.d));
+      else if (s.p) { const it = makeItem({ path: s.p, name: String(s.p).split(/[/\\]/).pop() }); if (s.n) it.name = s.n; if (s.d) it.duration = s.d; playlist.push(it); }
+    }
+    const idx = playlist.findIndex((it) => (it.path || it.url) === saved.cur);
+    if (idx >= 0) { currentIndex = idx; videoTitle.textContent = playlist[idx].name; videoSubtitle.textContent = 'Press play to continue where you left off'; }
+    renderPlaylist();
+    playlist.forEach((it) => { probeItem(it); });
+  }
+
+  // ---------------------------------------------------------------- playlist
+  function addFiles(files) {
+    const list = Array.from(files || []);
+    const a = api();
+    const paths = a && a.getPathForFile ? list.map(f => a.getPathForFile(f)).filter(Boolean) : [];
+    if (a && a.expandPaths && paths.length) { addNativePaths(paths); return; }
+
+    // Plain-browser fallback (no Electron bridge): blob URLs, browser engine only.
+    const subs = list.filter(f => /\.(srt|vtt|ass|ssa)$/i.test(f.name || ''));
+    const media = list.filter(f => !subs.includes(f) && (/^(video|audio)\//.test(f.type || '') || VIDEO_EXT.test(f.name || '') ||
+      /\.(mp3|flac|wav|aac|m4a|opus|ogg|oga)$/i.test(f.name || '')));
+    media.forEach(file => playlist.push({
+      name: file.name.replace(/\.[^/.]+$/, ''), fullName: file.name, url: URL.createObjectURL(file),
+      size: file.size, type: file.type || '', path: null, addedAt: Date.now()
+    }));
+    if (subs.length && playlist.length) loadExternalSub(subs[0]);
     renderPlaylist();
     if (currentIndex === -1 && playlist.length) playIndex(0);
   }
 
-  function addNativePaths(paths) {
-    addFiles(paths.map(p => ({ path: p, name: p.split(/[/\\]/).pop(), size: 0 })));
+  async function addNativePaths(paths, opts = {}) {
+    const a = api();
+    paths = (paths || []).filter(p => typeof p === 'string' && p);
+    if (!paths.length) return;
+    let media = [], subs = [];
+    if (a && a.expandPaths) {
+      const r = await a.expandPaths(paths).catch(() => null);
+      if (r) { media = r.media || []; subs = r.subs || []; }
+    } else {
+      media = paths.map(p => ({ path: p, name: p.split(/[/\\]/).pop(), size: 0 }));
+    }
+    if (!media.length && !subs.length) { showOSD('No playable media found'); return; }
+
+    const byPath = new Map(playlist.map((it, i) => [it.path, i]));
+    let firstIdx = -1;
+    const fresh = [];
+    media.forEach((m, n) => {
+      if (byPath.has(m.path)) { if (firstIdx < 0) firstIdx = byPath.get(m.path); return; }
+      const item = makeItem(m);
+      if (n === 0 && subs.length) item.subPath = subs[0];
+      playlist.push(item);
+      fresh.push(item);
+      byPath.set(m.path, playlist.length - 1);
+      if (firstIdx < 0) firstIdx = playlist.length - 1;
+    });
+    renderPlaylist();
+    fresh.forEach(probeItem);                       // durations / codecs / posters fill in as they are read
+    if (!media.length && subs.length) { loadSubFromPath(subs[0]); return; }
+    if (media.length > 1) showOSD(media.length + ' files added');
+    if (firstIdx >= 0 && (opts.play || currentIndex === -1)) playIndex(firstIdx);
+    savePlaylistSoon();
+  }
+
+  // ---- row rendering
+  const CODEC_NAMES = { hevc: 'HEVC', h264: 'H.264', av1: 'AV1', vp9: 'VP9', vp8: 'VP8', mpeg2video: 'MPEG-2', mpeg4: 'MPEG-4', vc1: 'VC-1', wmv3: 'WMV',
+    aac: 'AAC', ac3: 'AC3', eac3: 'E-AC3', dts: 'DTS', truehd: 'TrueHD', flac: 'FLAC', mp3: 'MP3', opus: 'Opus', vorbis: 'Vorbis', alac: 'ALAC', pcm_s16le: 'PCM', wmav2: 'WMA' };
+  const codecName = (c) => CODEC_NAMES[c] || String(c || '').toUpperCase();
+  function resLabel(i) {
+    const h = Math.max(i.height || 0, Math.round((i.width || 0) * 9 / 16));
+    return h >= 2000 ? '4K' : h >= 1400 ? '1440p' : h >= 1000 ? '1080p' : h >= 700 ? '720p' : h >= 460 ? '480p' : (i.height ? i.height + 'p' : '');
+  }
+  function metaParts(item) {
+    const parts = [];
+    const i = item.info;
+    if (item.missing) return ['File not found'];
+    if (item.stream) parts.push('Stream');
+    if (i) {
+      if (i.hasVideo) { const r = resLabel(i); if (r) parts.push(r); if (i.vcodec) parts.push(codecName(i.vcodec)); if (i.bitDepth >= 10) parts.push('10-bit'); if (i.hdr) parts.push(i.hdr); }
+      else if (i.acodec) parts.push(codecName(i.acodec));
+      if (i.audioTracks > 1) parts.push(i.audioTracks + ' audio');
+      if (i.subTracks) parts.push(i.subTracks + ' subs');
+    }
+    if (item.size) parts.push(formatSize(item.size));
+    return parts;
+  }
+
+  function buildRow(item, i) {
+    const li = document.createElement('li');
+    li.className = 'playlist-item' + (i === currentIndex ? ' active' : '') + (item.missing ? ' missing' : '');
+    li._item = item;
+    li.draggable = !plFilter;
+    const idx = document.createElement('span'); idx.className = 'index'; idx.textContent = String(i + 1);
+    const th = document.createElement('div'); th.className = 'thumb';
+    if (item.thumb) { const img = document.createElement('img'); img.src = item.thumb; img.alt = ''; img.loading = 'lazy'; th.appendChild(img); }
+    else th.appendChild(window.ZIcons ? window.ZIcons.make(item.stream ? 'network' : (item.info && !item.info.hasVideo ? 'music' : 'film')) : document.createTextNode(''));
+    const dur = itemDuration(item);
+    if (dur > 0) { const b = document.createElement('span'); b.className = 'dur'; b.textContent = formatTime(dur); th.appendChild(b); }
+    const info = document.createElement('div'); info.className = 'info';
+    const nm = document.createElement('div'); nm.className = 'name'; nm.textContent = item.name; nm.title = item.fullName;
+    const meta = document.createElement('div'); meta.className = 'meta';
+    metaParts(item).forEach((t, n) => { const s = document.createElement('span'); s.className = 'chip' + (n === 0 && item.missing ? ' bad' : ''); s.textContent = t; meta.appendChild(s); });
+    info.append(nm, meta);
+    const rm = document.createElement('button'); rm.className = 'remove'; rm.title = 'Remove'; rm.appendChild(window.ZIcons ? window.ZIcons.make('close') : document.createTextNode('✕'));
+    const pb = document.createElement('div'); pb.className = 'pbar';
+    const pf = document.createElement('i'); pb.appendChild(pf);
+    const saved = getSavedPos(item);
+    pf.style.width = dur > 0 && saved > 0 ? Math.min(100, saved / dur * 100) + '%' : '0%';
+    li.append(idx, th, info, rm, pb);
+
+    li.addEventListener('click', e => { if (!e.target.closest('.remove')) playIndex(playlist.indexOf(item)); });
+    rm.addEventListener('click', e => { e.stopPropagation(); removeIndex(playlist.indexOf(item)); });
+
+    li.addEventListener('dragstart', e => {
+      if (plFilter) { e.preventDefault(); return; }
+      dragItem = item; li.classList.add('dragging');
+      try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', 'zephyr-item'); } catch {}
+    });
+    li.addEventListener('dragend', () => { dragItem = null; li.classList.remove('dragging'); playlistEl.querySelectorAll('.drop-before,.drop-after').forEach(x => x.classList.remove('drop-before', 'drop-after')); });
+    li.addEventListener('dragover', e => {
+      if (!dragItem || dragItem === item) return;
+      e.preventDefault();
+      const r = li.getBoundingClientRect(); const before = e.clientY < r.top + r.height / 2;
+      li.classList.toggle('drop-before', before); li.classList.toggle('drop-after', !before);
+    });
+    li.addEventListener('dragleave', () => li.classList.remove('drop-before', 'drop-after'));
+    li.addEventListener('drop', e => {
+      if (!dragItem) return;
+      e.preventDefault(); e.stopPropagation();
+      const r = li.getBoundingClientRect(); const before = e.clientY < r.top + r.height / 2;
+      moveItem(dragItem, item, before);
+      dragItem = null;
+    });
+
+    if (!item.thumb && item.info && item.info.hasVideo) { if (thumbObserver) thumbObserver.observe(li); else queueThumb(item); }
+    return li;
+  }
+
+  function matchesFilter(item) {
+    if (!plFilter) return true;
+    return (item.name + ' ' + item.fullName).toLowerCase().includes(plFilter);
+  }
+
+  function updateFooter() {
+    const total = playlist.reduce((s, it) => s + itemDuration(it), 0);
+    const known = playlist.filter(it => itemDuration(it) > 0).length;
+    const hrs = total / 3600;
+    const dur = total > 0 ? ' · ' + (hrs >= 1 ? Math.floor(hrs) + 'h ' + Math.round((hrs % 1) * 60) + 'm' : Math.max(1, Math.round(total / 60)) + ' min') + (known < playlist.length ? '+' : '') : '';
+    trackCount.textContent = `${playlist.length} track${playlist.length !== 1 ? 's' : ''}${dur}`;
   }
 
   function renderPlaylist() {
-    playlistEl.innerHTML = '';
+    playlistEl.textContent = '';
     if (!playlist.length) {
-      playlistEl.innerHTML = '<li class="playlist-empty">No media yet.<br>Open files or drop them here.</li>';
+      const li = document.createElement('li');
+      li.className = 'playlist-empty';
+      li.append('No media yet.', document.createElement('br'), 'Open files, drop media or paste a link.');
+      playlistEl.appendChild(li);
       trackCount.textContent = '0 tracks';
       return;
     }
+    const frag = document.createDocumentFragment();
+    let shown = 0;
     playlist.forEach((item, i) => {
-      const li = document.createElement('li');
-      li.className = 'playlist-item' + (i === currentIndex ? ' active' : '');
-      li.innerHTML = `
-        <span class="index">${i+1}</span>
-        <div class="info">
-          <div class="name" title="${item.fullName}">${item.name}</div>
-          <div class="meta">${formatSize(item.size)}</div>
-        </div>
-        <button class="remove" data-i="${i}">✕</button>`;
-      li.addEventListener('click', e => { if (!e.target.closest('.remove')) playIndex(i); });
-      li.querySelector('.remove').addEventListener('click', e => { e.stopPropagation(); removeIndex(i); });
-      playlistEl.appendChild(li);
+      if (!matchesFilter(item)) { item._row = null; return; }
+      const li = buildRow(item, i);
+      item._row = li; shown++;
+      frag.appendChild(li);
     });
-    trackCount.textContent = `${playlist.length} track${playlist.length !== 1 ? 's' : ''}`;
+    if (!shown) { const li = document.createElement('li'); li.className = 'playlist-empty'; li.textContent = 'Nothing matches "' + plFilter + '"'; frag.appendChild(li); }
+    playlistEl.appendChild(frag);
+    updateFooter();
+    const active = playlistEl.querySelector('.playlist-item.active');
+    if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest' });
+  }
+
+  function updateRow(item) {
+    const i = playlist.indexOf(item);
+    if (i < 0) return;
+    if (item._row && item._row.parentNode) {
+      const li = buildRow(item, i);
+      item._row.replaceWith(li);
+      item._row = li;
+    }
+    updateFooter();
+  }
+  function updateRowProgress(item) {
+    if (!item || !item._row) return;
+    const pf = item._row.querySelector('.pbar i'); if (!pf) return;
+    const d = itemDuration(item), s = getSavedPos(item);
+    pf.style.width = d > 0 && s > 0 ? Math.min(100, s / d * 100) + '%' : '0%';
+  }
+
+  function moveItem(item, target, before) {
+    const cur = playlist[currentIndex];
+    const from = playlist.indexOf(item);
+    if (from < 0) return;
+    playlist.splice(from, 1);
+    let to = playlist.indexOf(target);
+    if (to < 0) to = playlist.length;
+    playlist.splice(before ? to : to + 1, 0, item);
+    currentIndex = cur ? playlist.indexOf(cur) : -1;
+    renderPlaylist();
+    savePlaylistSoon();
+  }
+
+  function sortPlaylist(mode) {
+    if (!mode || !playlist.length) return;
+    const cur = playlist[currentIndex];
+    const by = (f, dir = 1) => (a, b) => dir * (f(a) < f(b) ? -1 : f(a) > f(b) ? 1 : 0);
+    const nat = (a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' });
+    let label = '';
+    switch (mode) {
+      case 'name': playlist.sort(nat); label = 'name'; break;
+      case 'name-desc': playlist.sort((a, b) => -nat(a, b)); label = 'name (Z→A)'; break;
+      case 'dur': playlist.sort(by(itemDuration)); label = 'shortest first'; break;
+      case 'dur-desc': playlist.sort(by(itemDuration, -1)); label = 'longest first'; break;
+      case 'size-desc': playlist.sort(by((x) => x.size || 0, -1)); label = 'largest first'; break;
+      case 'added': playlist.sort(by((x) => x.addedAt || 0)); label = 'order added'; break;
+      case 'random':
+        for (let i = playlist.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [playlist[i], playlist[j]] = [playlist[j], playlist[i]]; }
+        label = 'random'; break;
+      case 'dedupe': {
+        const seen = new Set(); const before = playlist.length;
+        playlist = playlist.filter((it) => { const k = (it.path || it.url || '').toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+        showOSD(before - playlist.length + ' duplicate(s) removed'); label = null; break;
+      }
+      case 'missing': {
+        const before = playlist.length; playlist = playlist.filter((it) => !it.missing);
+        showOSD(before - playlist.length + ' missing file(s) removed'); label = null; break;
+      }
+    }
+    currentIndex = cur ? playlist.indexOf(cur) : -1;
+    if (label) showOSD('Sorted: ' + label);
+    renderPlaylist();
+    savePlaylistSoon();
   }
 
   function removeIndex(i) {
-    if (playlist[i].url && playlist[i].url.startsWith('blob:')) URL.revokeObjectURL(playlist[i].url);
+    const it = playlist[i];
+    if (!it) return;
+    if (it.url && it.url.startsWith('blob:')) URL.revokeObjectURL(it.url);
     playlist.splice(i, 1);
+    for (let h = history.length - 1; h >= 0; h--) if (history[h] === it) history.splice(h, 1);
+    playedSet.delete(it);
     if (currentIndex === i) {
-      if (playlist.length) playIndex(Math.min(i, playlist.length - 1));
+      currentIndex = -1;
+      if (playlist.length) playIndex(Math.min(i, playlist.length - 1), { noHistory: true });
       else resetPlayer();
     } else if (currentIndex > i) currentIndex--;
     renderPlaylist();
+    savePlaylistSoon();
   }
 
   function clearPlaylist() {
     playlist.forEach(item => { if (item.url && item.url.startsWith('blob:')) URL.revokeObjectURL(item.url); });
     playlist = [];
     currentIndex = -1;
+    history.length = 0;
+    playedSet.clear();
     resetPlayer();
     renderPlaylist();
+    lsDel('zephyr-playlist-v1');
   }
 
+  if (plFilterEl) plFilterEl.addEventListener('input', () => { plFilter = plFilterEl.value.trim().toLowerCase(); renderPlaylist(); });
+  if (plSortEl) plSortEl.addEventListener('change', () => { const m = plSortEl.value; plSortEl.value = ''; sortPlaylist(m); });
+
   function resetPlayer() {
+    loadToken++;
+    savePosition();
+    if (isMpv() || mp.active) { const a = api(); if (a && a.mpvStop) a.mpvStop(); }
+    engine = 'html5'; mp.active = false; mp.time = 0; mp.duration = 0; mp.tracks = [];
+    video.pause();
     video.removeAttribute('src');
     video.load();
     dropZone.classList.remove('hidden');
     bigPlay.hidden = true;
+    loader.hidden = true;
     videoTitle.textContent = 'ZephyrPlayer';
     videoSubtitle.textContent = 'Open files or drop media here';
     subtitleDisplay.textContent = '';
+    subCues = [];
     updatePlayIcon(false);
     played.style.width = '0%';
     handle.style.left = '0%';
     currentTimeEl.textContent = '0:00';
     durationEl.textContent = '0:00';
-    if (window.electronAPI && window.electronAPI.reportProgress) {
-      window.electronAPI.reportProgress(-1);
+    if (api() && api().reportProgress) api().reportProgress(-1);
+  }
+
+  // ------------------------------------------------------- resume positions
+  function savePosition() {
+    if (!rememberPos || currentIndex < 0) return;
+    const item = playlist[currentIndex];
+    if (!item || !hasMedia()) return;
+    const t = curTime(), d = curDur();
+    if (!(d > 0)) return;
+    if (t > 5 && t < d - 8) {
+      updateRowProgress(item);
+      lsSet(posKey(item), String(Math.floor(t)));
+      lsSet('zephyr-pos-' + item.fullName, String(Math.floor(t))); // legacy key: library "watched %"
+    } else if (t >= d - 8) {
+      lsDel(posKey(item)); lsDel('zephyr-pos-' + item.fullName);
     }
   }
+  function getSavedPos(item) {
+    if (!rememberPos || !item) return 0;
+    const v = parseFloat(lsGet(posKey(item)) || lsGet('zephyr-pos-' + item.fullName) || '0');
+    return v > 5 ? v : 0;
+  }
+  setInterval(() => { if (!document.hidden || isMpv()) savePosition(); }, 5000);
+  window.addEventListener('beforeunload', savePosition);
 
-  // Chromium's built-in <video> element has no native demuxer for these
-  // containers — it will silently fail to play them even though mpv handles
-  // them fine. Route these straight to mpv instead of the browser engine.
-  function needsMpvContainer(fullName) {
-    return /\.(ts|m2ts|mts|wmv|flv|mpg|mpeg|asf|rm|rmvb|vob|divx)$/i.test(fullName || '');
+  // ------------------------------------------------------------ engine routing
+  function chooseEngine(item) {
+    if (item.stream) return 'mpv';
+    if (!mpvReady) return 'html5';
+    if (item.forceMpv || needsMpvContainer(item.fullName)) return 'mpv';
+    return 'html5';
   }
 
-  function playIndex(i) {
+  function playIndex(i, opts = {}) {
     if (i < 0 || i >= playlist.length) return;
-    // Save position
-    if (rememberPos && currentIndex >= 0 && video.currentTime > 5) {
-      try { localStorage.setItem('zephyr-pos-' + playlist[currentIndex].fullName, video.currentTime); } catch {}
+    savePosition();
+    const prev = playlist[currentIndex];
+    if (prev) updateRowProgress(prev);
+    const item = playlist[i];
+    if (prev && prev !== item && !opts.noHistory) {
+      history.push(prev);
+      if (history.length > 100) history.shift();
     }
     currentIndex = i;
-    const item = playlist[i];
+    if (shuffle) playedSet.add(item);
+    item._triedMpv = false;
+    item._audioChecked = false;
+    const token = ++loadToken;
+    resetAB();
+    subCues = [];
+    subtitleDisplay.textContent = '';
+    if (typeof chapters !== 'undefined') chapters = [];
 
-    if (item.path && window.electronAPI && window.electronAPI.recordOpened) {
-      window.electronAPI.recordOpened(item.path);
-    }
-
-    if (item.path && needsMpvContainer(item.fullName) && mpvReady) {
-      loader.hidden = true;
-      videoTitle.textContent = item.name;
-      videoSubtitle.textContent = item.fullName;
-      dropZone.classList.add('hidden');
-      bigPlay.hidden = true;
-      renderPlaylist();
-      playWithMpv([item.path], getQuality());
-      return;
-    }
-
-    loader.hidden = false;
-    video.src = item.url;
     videoTitle.textContent = item.name;
-    videoSubtitle.textContent = item.fullName;
+    videoSubtitle.textContent = item.stream ? 'Stream' : item.fullName;
     dropZone.classList.add('hidden');
     bigPlay.hidden = true;
     renderPlaylist();
-    video.play().catch(() => { bigPlay.hidden = false; updatePlayIcon(false); });
+    savePlaylistSoon();
+    if (item.path && api() && api().recordOpened) api().recordOpened(item.path);
+
+    const start = opts.startPos != null ? opts.startPos : getSavedPos(item);
+    const go = () => {
+      if (token !== loadToken) return;
+      if (chooseEngine(item) === 'mpv') startMpvItem(item, start, token);
+      else startHtml5(item, start, token);
+    };
+    // Know the codecs BEFORE choosing the engine (HEVC/AC3/10-bit go straight to mpv, no failed first attempt).
+    if (!item.info && item.path && api() && api().probeMedia && !item.missing) {
+      Promise.race([probeItem(item), new Promise(r => setTimeout(r, 700))]).then(go, go);
+    } else go();
   }
 
-  // Safety net: if the browser engine fails on a format we didn't anticipate
-  // (unsupported codec inside an otherwise-normal container, etc.), fall
-  // back to mpv automatically instead of leaving a dead player.
-  video.addEventListener('error', () => {
-    const item = playlist[currentIndex];
-    if (item && item.path && mpvReady) {
-      showOSD('Browser engine can\'t play this — switching to mpv…');
-      playWithMpv([item.path], getQuality());
+  function setABTag(txt) {
+    const tag = document.getElementById('abTag');
+    if (!tag) return;
+    tag.hidden = !txt;
+    tag.textContent = txt;
+  }
+
+  function resetAB() {
+    abLoop = { a: null, b: null, active: false };
+    abLoopBtn.classList.remove('active');
+    setABTag('');
+    abRange.hidden = true;
+  }
+
+  function startHtml5(item, start, token) {
+    if (isMpv() || mp.active) { const a = api(); if (a && a.mpvStop) a.mpvStop(); }
+    engine = 'html5'; mp.active = false; mp.eof = false;
+    loader.hidden = false;
+    pendingStart = start || 0;
+    video.muted = userMuted;
+    video.src = item.url;
+    video.playbackRate = clamp(speedRate, 0.25, 4);
+    const p = video.play();
+    if (p && p.catch) p.catch(err => {
+      if (token !== loadToken) return;
+      if (err && err.name === 'NotAllowedError') { bigPlay.hidden = false; updatePlayIcon(false); }
+    });
+    loadSidecarSubs(item, token);
+  }
+  let pendingStart = 0;
+
+  async function startMpvItem(item, start, token) {
+    const a = api();
+    if (!a || !a.mpvPlayExternal) { startHtml5(item, start, token); return; }
+    engine = 'mpv'; mp.active = false; mp.eof = false; mp.time = start || 0; mp.duration = 0; mp.paused = false; mp.tracks = [];
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    loader.hidden = false;
+    bigPlay.hidden = true;
+    updatePlayIcon(true);
+    played.style.width = '0%'; handle.style.left = '0%';
+    currentTimeEl.textContent = formatTime(start || 0);
+    durationEl.textContent = '0:00';
+    if (typeof reportEmbedBounds === 'function') reportEmbedBounds();
+
+    const common = { quality: getQuality(), embed: true, startPos: start || 0, volume: Math.round(volumeLevel * 100), mute: userMuted };
+    let res;
+    try {
+      res = item.stream
+        ? await a.mpvPlayUrl(item.url, common.quality, true, {
+            startPos: common.startPos, volume: common.volume, mute: common.mute, cookies: lsGet('zephyr-ytCookies') || '',
+            vo: lsGet('zephyr-settingVo') || 'gpu', hwdec: lsGet('zephyr-settingHwdec') || 'auto', perf: lsGet('zephyr-settingPerf') || 'smooth'
+          })
+        : await a.mpvPlayExternal(Object.assign({ files: [item.path],
+            vo: lsGet('zephyr-settingVo') || 'gpu', hwdec: lsGet('zephyr-settingHwdec') || 'auto', perf: lsGet('zephyr-settingPerf') || 'smooth' }, common));
+    } catch (e) { res = { ok: false, error: e && e.message }; }
+    if (token !== loadToken) return;
+
+    if (res && res.ok) {
+      mpvMode = res.mode || 'off';
+      mp.active = true;
+      showOSD(res.embedded ? 'mpv · embedded' : 'mpv · separate window', 1400);
+      loadSubsForMpv(item, token);
+      return;
     }
-  });
-
-  // Playback
-  function togglePlay() {
-    if (!video.src) return;
-    video.paused ? video.play() : video.pause();
+    // mpv could not start: fall back to the browser engine when the file is local
+    engine = 'html5';
+    if (!item.stream && item.path && !item._htmlTried) {
+      item._htmlTried = true;
+      showOSD('mpv unavailable — using browser engine', 2000);
+      startHtml5(item, start, token);
+      return;
+    }
+    showPlayError((res && res.error) ? String(res.error) : 'mpv failed to start');
   }
+
+  async function loadSubsForMpv(item, token) {
+    if (item.subPath) { await mpvCmd('sub-add', item.subPath, 'select'); }
+  }
+
+  function fallbackToMpv(reason) {
+    const item = playlist[currentIndex];
+    if (!item || !item.path || item._triedMpv || !mpvReady) return false;
+    item._triedMpv = true;
+    showOSD(reason + ' — switching to mpv…', 2200);
+    const t = video.currentTime || 0;
+    startMpvItem(item, t > 5 ? t : getSavedPos(item), loadToken);
+    return true;
+  }
+
+  function showPlayError(msg) {
+    msg = String(msg || 'Playback error');
+    loader.hidden = true;
+    videoSubtitle.textContent = msg;
+    const readTime = clamp(msg.length * 70, 3500, 9000);   // long, helpful messages stay readable
+    showOSD(msg.slice(0, 220), readTime);
+    errorStreak++;
+    if (autoNext && playlist.length > 1 && errorStreak < playlist.length) {
+      const token = loadToken;
+      setTimeout(() => { if (token === loadToken) step(1); }, readTime + 400);
+    }
+  }
+
+  function stopAll() {
+    loadToken++;
+    savePosition();
+    const a = api();
+    if (a && a.mpvStop && (isMpv() || mp.active)) a.mpvStop();
+    video.pause();
+    if (isMpv()) { engine = 'html5'; mp.active = false; updatePlayIcon(false); bigPlay.hidden = playlist.length === 0; }
+  }
+
+  // ------------------------------------------------------------- next / prev
+  function pickNext(auto) {
+    if (!playlist.length) return -1;
+    if (shuffle && playlist.length > 1) {
+      // "bag" shuffle: every item plays once per cycle (no immediate repeats, nothing starves)
+      const cur = playlist[currentIndex];
+      if (cur) playedSet.add(cur);
+      let pool = playlist.filter(it => !playedSet.has(it) && !it.missing);
+      if (!pool.length) {
+        if (auto && repeatMode !== 1) return -1;        // finished the whole shuffled cycle
+        playedSet.clear(); if (cur) playedSet.add(cur);
+        pool = playlist.filter(it => it !== cur && !it.missing);
+        if (!pool.length) return -1;
+      }
+      return playlist.indexOf(pool[Math.floor(Math.random() * pool.length)]);
+    }
+    let n = currentIndex + 1;
+    while (n < playlist.length && playlist[n].missing) n++;
+    if (n >= playlist.length) return repeatMode === 1 ? Math.max(0, playlist.findIndex(it => !it.missing)) : -1;
+    return n;
+  }
+
+  function step(dir) {
+    if (!playlist.length) return;
+    if (dir < 0) {
+      if (curTime() > 3) { seekTo(0); return; }
+      while (history.length) {
+        const it = history.pop();
+        const idx = playlist.indexOf(it);
+        if (idx >= 0 && idx !== currentIndex) { playIndex(idx, { noHistory: true }); return; }
+      }
+      if (currentIndex > 0) playIndex(currentIndex - 1, { noHistory: true });
+      else seekTo(0);
+      return;
+    }
+    const n = pickNext(false);
+    if (n >= 0) playIndex(n);
+    else showOSD('End of playlist');
+  }
+
+  function handleEnded() {
+    const item = playlist[currentIndex];
+    if (item) { lsDel(posKey(item)); lsDel('zephyr-pos-' + item.fullName); }
+    if (repeatMode === 2) {
+      seekTo(0);
+      if (isMpv()) mpvSet('pause', false); else video.play().catch(() => {});
+      return;
+    }
+    if (autoNext || repeatMode === 1) {
+      const n = pickNext(true);
+      if (n >= 0) { playIndex(n); return; }
+    }
+    updatePlayIcon(false);
+    if (!isMpv()) bigPlay.hidden = false;
+  }
+
+  // ---------------------------------------------------------------- transport
+  function togglePlay() {
+    if (isMpv()) {
+      if (mp.eof) { mpvCmd('seek', 0, 'absolute'); mpvSet('pause', false); }
+      else mpvCmd('cycle', 'pause');
+      return;
+    }
+    if (!video.getAttribute('src')) {
+      if (playlist.length) playIndex(Math.max(0, currentIndex));
+      return;
+    }
+    if (video.paused) video.play().catch(() => {}); else video.pause();
+  }
+  function pausePlayback() { if (isMpv()) mpvSet('pause', true); else video.pause(); }
   function updatePlayIcon(playing) {
     iconPlay.hidden = playing;
     iconPause.hidden = !playing;
   }
+
+  let seekThrottle = 0;
+  function seekTo(t) {
+    if (!hasMedia()) return;
+    const d = curDur();
+    t = Math.max(0, d ? Math.min(d, t) : t);
+    if (isMpv()) { mp.time = t; mpvCmd('seek', t, 'absolute'); }
+    else video.currentTime = t;
+  }
   function seekRelative(sec) {
-    if (!video.src) return;
-    video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + sec));
+    if (!hasMedia()) return;
+    seekTo(curTime() + sec);
     showOSD((sec > 0 ? '+' : '') + sec + 's');
   }
 
-  // Progress
+  // ------------------------------------------------------------------ progress
+  let lastReport = 0;
   function updateProgress() {
-    if (isSeeking || !video.duration) return;
-    const pct = (video.currentTime / video.duration) * 100;
-    played.style.width = pct + '%';
-    handle.style.left = pct + '%';
-    currentTimeEl.textContent = formatTime(video.currentTime);
-
-    if (window.electronAPI && window.electronAPI.reportProgress) {
-      window.electronAPI.reportProgress(video.currentTime / video.duration);
+    const d = curDur(), t = curTime();
+    if (!isSeeking && d) {
+      const pct = clamp(t / d * 100, 0, 100);
+      played.style.width = pct + '%';
+      handle.style.left = pct + '%';
+      currentTimeEl.textContent = formatTime(t);
     }
-
-    // A-B loop
-    if (abLoop.active && abLoop.b !== null && video.currentTime >= abLoop.b) {
-      video.currentTime = abLoop.a;
+    const now = performance.now();
+    if (d && now - lastReport > 1000) {
+      lastReport = now;
+      if (api() && api().reportProgress) api().reportProgress(t / d);
     }
+    if (!isMpv() && abLoop.active && abLoop.b !== null && t >= abLoop.b) video.currentTime = abLoop.a;
   }
   function updateBuffered() {
-    if (!video.duration || !video.buffered.length) return;
+    if (isMpv() || !video.duration || !video.buffered.length) return;
     buffered.style.width = (video.buffered.end(video.buffered.length - 1) / video.duration) * 100 + '%';
   }
-  function seekFromEvent(e) {
+  function seekFromEvent(e, final) {
+    const d = curDur();
+    if (!d) return;
     const rect = progressBar.getBoundingClientRect();
-    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    if (video.duration) {
-      video.currentTime = pct * video.duration;
-      played.style.width = pct * 100 + '%';
-      handle.style.left = pct * 100 + '%';
+    const pct = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+    played.style.width = pct * 100 + '%';
+    handle.style.left = pct * 100 + '%';
+    currentTimeEl.textContent = formatTime(pct * d);
+    if (isMpv()) {
+      const now = performance.now();
+      if (final || now - seekThrottle > 90) { seekThrottle = now; seekTo(pct * d); }
+    } else {
+      video.currentTime = pct * d;
     }
   }
   function updateABVisual() {
-    if (abLoop.a !== null && abLoop.b !== null && video.duration) {
+    const d = curDur();
+    if (abLoop.a !== null && abLoop.b !== null && d) {
       abRange.hidden = false;
-      abRange.style.left = (abLoop.a / video.duration * 100) + '%';
-      abRange.style.width = ((abLoop.b - abLoop.a) / video.duration * 100) + '%';
+      abRange.style.left = (abLoop.a / d * 100) + '%';
+      abRange.style.width = ((abLoop.b - abLoop.a) / d * 100) + '%';
     } else {
       abRange.hidden = true;
     }
   }
 
-  // Volume
-  function setVolume(val) {
-    video.volume = Math.min(1, val); // HTML5 max is 1, but we allow slider >1 for visual boost intent
+  // -------------------------------------------------------------------- volume
+  function setBtnIcon(btn, name) {
+    const z = btn && btn.querySelector('.zi');
+    if (z && window.ZIcons) window.ZIcons.set(z, name);
+  }
+  function updateMuteIcon() {
+    setBtnIcon(muteBtn, userMuted || volumeLevel === 0 ? 'volume-mute' : (volumeLevel < 0.5 ? 'volume-low' : 'volume-high'));
+  }
+  function setVolume(val, opts = {}) {
+    val = clamp(Number(val) || 0, 0, 1.5);
+    volumeLevel = val;
+    video.volume = Math.min(1, val);
     volumeSlider.value = val;
-    video.muted = false;
-    muteBtn.textContent = val === 0 || video.muted ? '🔇' : (val < 0.4 ? '🔈' : '🔊');
+    if (!opts.keepMute && val > 0) { userMuted = false; video.muted = false; if (isMpv() || opts.sync) mpvSet('mute', false); }
+    if (isMpv() || opts.sync) mpvSet('volume', Math.round(val * 100));
+    updateMuteIcon();
+    lsSet('zephyr-volume', String(val));
+    if (!opts.silent) showOSD('Volume ' + Math.round(val * 100) + '%' + (val > 1 && !isMpv() ? ' (boost needs mpv)' : ''), 900);
   }
   function toggleMute() {
-    video.muted = !video.muted;
-    muteBtn.textContent = video.muted || video.volume === 0 ? '🔇' : '🔊';
+    userMuted = !userMuted;
+    video.muted = userMuted;
+    if (isMpv()) mpvSet('mute', userMuted);
+    updateMuteIcon();
+    showOSD(userMuted ? 'Muted' : 'Volume ' + Math.round(volumeLevel * 100) + '%', 900);
   }
 
-  // Fullscreen / PiP
+  // ----------------------------------------------------------- fullscreen / PiP
   function toggleFullscreen() {
+    if (isMpv() && mpvMode === 'off') { mpvCmd('cycle', 'fullscreen'); return; } // mpv's own window
     if (!document.fullscreenElement) {
-      videoWrapper.requestFullscreen?.() || videoWrapper.webkitRequestFullscreen?.();
+      const p = videoWrapper.requestFullscreen ? videoWrapper.requestFullscreen() : null;
+      if (p && p.catch) p.catch(() => {});
     } else {
-      document.exitFullscreen?.() || document.webkitExitFullscreen?.();
+      const p = document.exitFullscreen ? document.exitFullscreen() : null;
+      if (p && p.catch) p.catch(() => {});
     }
   }
   async function togglePiP() {
+    if (isMpv()) { showOSD('Picture-in-picture needs the browser engine'); return; }
     try {
       if (document.pictureInPictureElement) await document.exitPictureInPicture();
       else if (document.pictureInPictureEnabled) await video.requestPictureInPicture();
     } catch (e) { console.warn(e); }
   }
 
-  // Speed
+  // --------------------------------------------------------------------- speed
   function setSpeed(rate) {
+    rate = clamp(Math.round(rate * 100) / 100, 0.25, 4);
+    speedRate = rate;
     video.playbackRate = rate;
+    if (isMpv()) mpvSet('speed', rate);
     speedLabel.textContent = rate + '×';
     speedMenu.querySelectorAll('button').forEach(b => b.classList.toggle('active', parseFloat(b.dataset.speed) === rate));
     speedMenu.hidden = true;
     showOSD(rate + '×');
   }
 
-  // A-B Loop
+  // --------------------------------------------------------------------- A-B loop
+  let abRaf = 0;
+  function abTick() {
+    abRaf = 0;
+    if (!abLoop.active || isMpv()) return;
+    if (!video.paused && abLoop.b !== null && video.currentTime >= abLoop.b) video.currentTime = abLoop.a;
+    abRaf = requestAnimationFrame(abTick);
+  }
   function handleABLoop() {
+    if (!hasMedia()) return;
+    const t = curTime();
     if (abLoop.a === null) {
-      abLoop.a = video.currentTime;
+      abLoop.a = t;
       abLoopBtn.classList.add('active');
-      abLoopBtn.textContent = 'A–';
+      setABTag('A');
+      if (isMpv()) mpvSet('ab-loop-a', t);
       showOSD('A point set');
     } else if (abLoop.b === null) {
-      abLoop.b = video.currentTime;
-      if (abLoop.b <= abLoop.a) { abLoop.b = null; showOSD('B must be after A'); return; }
+      if (t <= abLoop.a) { showOSD('B must be after A'); return; }
+      abLoop.b = t;
       abLoop.active = true;
-      abLoopBtn.textContent = 'A-B';
+      setABTag('A·B');
       updateABVisual();
+      if (isMpv()) mpvSet('ab-loop-b', t); else if (!abRaf) abRaf = requestAnimationFrame(abTick);
       showOSD('A-B loop on');
     } else {
-      abLoop = { a: null, b: null, active: false };
-      abLoopBtn.classList.remove('active');
-      abLoopBtn.textContent = 'A-B';
-      updateABVisual();
+      resetAB();
+      if (isMpv()) { mpvSet('ab-loop-a', 'no'); mpvSet('ab-loop-b', 'no'); }
       showOSD('A-B loop off');
     }
   }
 
-  // Screenshot
-  function takeScreenshot() {
+  // ------------------------------------------------------------------ screenshot
+  async function takeScreenshot() {
+    if (!hasMedia()) return;
+    if (isMpv()) {
+      const r = await mpvCmd('screenshot');
+      showOSD(r && r.ok ? 'Screenshot saved to Pictures\\ZephyrPlayer' : 'Screenshot failed', 1800);
+      return;
+    }
     if (!video.videoWidth) return;
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext('2d').drawImage(video, 0, 0);
-    canvas.toBlob(blob => {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext('2d').drawImage(video, 0, 0);
+      const blob = await new Promise((res, rej) => { try { canvas.toBlob(b => (b ? res(b) : rej(new Error('empty'))), 'image/png'); } catch (e) { rej(e); } });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = `zephyr-${Date.now()}.png`;
       a.click();
-      URL.revokeObjectURL(a.href);
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
       showOSD('Screenshot saved');
-    }, 'image/png');
+    } catch {
+      // local files are cross-origin for canvas readback — capture the rendered window area instead
+      const r = videoWrapper.getBoundingClientRect();
+      const res = api() && api().capturePage ? await api().capturePage({ x: r.left, y: r.top, width: r.width, height: r.height }) : null;
+      showOSD(res && res.ok ? 'Screenshot saved to Pictures\\ZephyrPlayer' : 'Screenshot failed', 1800);
+    }
   }
 
-  // Subtitles (basic external)
-  function loadExternalSub(file) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const text = reader.result;
-      // Very basic SRT/VTT parser for display
-      parseAndShowSubs(text);
-      showOSD('Subtitles loaded');
-    };
-    reader.readAsText(file);
-  }
-
+  // ------------------------------------------------------------------- subtitles
   let subCues = [];
-  function parseAndShowSubs(text) {
-    subCues = [];
-    // Simple SRT-like parse
-    const blocks = text.replace(/\r/g, '').split(/\n\n+/);
-    blocks.forEach(block => {
-      const lines = block.trim().split('\n');
-      if (lines.length < 2) return;
-      const timeLine = lines.find(l => l.includes('-->')) || lines[1];
-      const m = timeLine.match(/(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})/);
-      if (!m) return;
-      const start = timeToSec(m[1]);
-      const end = timeToSec(m[2]);
-      const content = lines.slice(lines.indexOf(timeLine) + 1).join('\n');
-      subCues.push({ start, end, text: content });
-    });
+  function setSubCues(cues, label) {
+    subCues = cues || [];
+    subtitleDisplay.textContent = '';
+    showOSD(subCues.length ? `Subtitles loaded${label ? ' · ' + label : ''} (${subCues.length})` : 'No subtitle cues found in file', 1800);
+    if (typeof refreshHtml5Tracks === 'function') refreshHtml5Tracks();
+    if (typeof cacheSubsForCurrent === 'function' && subCues.length) cacheSubsForCurrent();
   }
-  function timeToSec(t) {
-    const p = t.replace(',', '.').split(':');
-    return parseFloat(p[0]) * 3600 + parseFloat(p[1]) * 60 + parseFloat(p[2]);
+  function parseSubBytes(bytes) {
+    const Z = window.ZSub;
+    if (!Z) return [];
+    return Z.parse(Z.decode(bytes));
   }
+  async function loadSubFromPath(p, opts = {}) {
+    if (isMpv()) {
+      const r = await mpvCmd('sub-add', p, 'select');
+      if (!opts.silent) showOSD(r && r.ok ? 'Subtitles loaded' : 'Could not load subtitles');
+      return;
+    }
+    const a = api();
+    if (!a || !a.readSubtitle) return;
+    const r = await a.readSubtitle(p).catch(() => null);
+    if (opts.token && opts.token !== loadToken) return;
+    if (!r || !r.ok) { if (!opts.silent) showOSD('Could not read subtitles'); return; }
+    const label = String(p).split(/[/\\]/).pop();
+    if (opts.silent) { subCues = parseSubBytes(r.bytes); refreshHtml5Tracks(); if (subCues.length) showOSD('Subtitles: ' + label, 1500); }
+    else setSubCues(parseSubBytes(r.bytes), label);
+  }
+  function loadExternalSub(file) {
+    const a = api();
+    const p = a && a.getPathForFile ? a.getPathForFile(file) : '';
+    if (isMpv() && p) { loadSubFromPath(p); return; }
+    const reader = new FileReader();
+    reader.onload = () => setSubCues(parseSubBytes(new Uint8Array(reader.result)), file.name);
+    reader.onerror = () => showOSD('Could not read subtitle file');
+    reader.readAsArrayBuffer(file);
+  }
+  async function loadSidecarSubs(item, token) {
+    const a = api();
+    if (!a || !a.sidecarSubs || !item.path) { if (!subCues.length && typeof loadCachedSubs === 'function') loadCachedSubs(); return; }
+    if (item.subPath) { await loadSubFromPath(item.subPath, { silent: true, token }); return; }
+    const r = await a.sidecarSubs(item.path).catch(() => null);
+    if (token !== loadToken) return;
+    const subs = (r && r.subs) || [];
+    if (!subs.length) { if (!subCues.length && typeof loadCachedSubs === 'function') loadCachedSubs(); return; }
+    const pref = subs.find(s => /[._ -](en|eng|english)[._ -][^/\\]*$/i.test(s) || /[._ -](en|eng|english)\.(srt|vtt|ass|ssa)$/i.test(s)) || subs[0];
+    await loadSubFromPath(pref, { silent: true, token });
+  }
+  let lastSubText = '';
   function updateSubtitles() {
-    if (!subCues.length) { subtitleDisplay.textContent = ''; return; }
-    const t = video.currentTime - (typeof subDelaySec === "number" ? subDelaySec : 0);
-    const cue = subCues.find(c => t >= c.start && t <= c.end);
-    subtitleDisplay.textContent = cue ? cue.text : '';
+    if (isMpv() || !subCues.length) {
+      if (lastSubText) { subtitleDisplay.textContent = ''; lastSubText = ''; }
+      return;
+    }
+    const t = video.currentTime - (typeof subDelaySec === 'number' ? subDelaySec : 0);
+    let text = '';
+    for (let i = 0; i < subCues.length; i++) {
+      const c = subCues[i];
+      if (t >= c.start && t <= c.end) text += (text ? '\n' : '') + c.text;
+    }
+    if (text !== lastSubText) { subtitleDisplay.textContent = text; lastSubText = text; }
   }
 
   // Repeat / Shuffle
+  function paintRepeat() {
+    const labels = ['Off', 'All', 'One'];
+    setBtnIcon(repeatBtn, repeatMode === 2 ? 'repeat-one' : 'repeat');
+    const l = repeatBtn.querySelector('.lbl'); if (l) l.textContent = labels[repeatMode];
+    repeatBtn.title = 'Repeat: ' + labels[repeatMode];
+    repeatBtn.classList.toggle('active', repeatMode > 0);
+  }
   function cycleRepeat() {
     repeatMode = (repeatMode + 1) % 3;
-    const labels = ['🔁 Off', '🔁 All', '🔂 One'];
-    repeatBtn.textContent = labels[repeatMode];
-    repeatBtn.classList.toggle('active', repeatMode > 0);
-    showOSD(labels[repeatMode]);
+    lsSet('zephyr-repeat', String(repeatMode));
+    paintRepeat();
+    showOSD('Repeat: ' + ['off', 'all', 'one'][repeatMode]);
+  }
+  function paintShuffle() {
+    shuffleBtn.classList.toggle('active', shuffle);
+    shuffleBtn.setAttribute('aria-pressed', String(shuffle));
   }
   function toggleShuffle() {
     shuffle = !shuffle;
-    shuffleBtn.classList.toggle('active', shuffle);
-    showOSD(shuffle ? 'Shuffle on' : 'Shuffle off');
+    playedSet.clear();
+    const cur = playlist[currentIndex];
+    if (shuffle && cur) playedSet.add(cur);
+    lsSet('zephyr-shuffle', shuffle ? '1' : '0');
+    paintShuffle();
+    showOSD(shuffle ? 'Shuffle on — every item plays once per round' : 'Shuffle off');
   }
 
   // Theme & Settings
@@ -456,7 +1092,7 @@
     const theme = $('settingTheme').value;
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('zephyr-theme', theme);
-    setVolume(parseFloat($('settingVolume').value));
+    { const v = parseFloat($('settingVolume').value); if (Math.abs(v - volumeLevel) > 0.001) setVolume(v, { silent: true }); }
     seekStep = parseInt($('settingSeek').value, 10) || 10;
     autoNext = $('settingAutoNext').checked;
     rememberPos = $('settingRemember').checked;
@@ -502,49 +1138,60 @@
     folderInput.click();
   }
 
-  // Events
-  video.addEventListener('play', () => {
-    updatePlayIcon(true);
-    bigPlay.hidden = true;
-  });
+  // Events (browser engine)
+  let stallTimer = null;
+  const clearStall = () => { if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; } };
+  video.addEventListener('play', () => { updatePlayIcon(true); bigPlay.hidden = true; });
   video.addEventListener('pause', () => {
+    if (isMpv()) return;
     updatePlayIcon(false);
-    // Only show center play when we have a source and are paused
-    if (video.src && !video.ended) bigPlay.hidden = false;
-    else bigPlay.hidden = true;
+    bigPlay.hidden = !(video.getAttribute('src') && !video.ended);
+    clearStall();
   });
-  video.addEventListener('timeupdate', () => { updateProgress(); updateSubtitles(); });
+  video.addEventListener('playing', () => { loader.hidden = true; errorStreak = 0; clearStall(); });
+  video.addEventListener('timeupdate', () => {
+    if (isMpv()) return;
+    updateProgress();
+    updateSubtitles();
+    const item = playlist[currentIndex];
+    // Audio codec the browser can't decode (AC3/DTS/...): video plays silently -> hand over to mpv.
+    if (item && !item._audioChecked && video.currentTime > 2.5 && !video.paused) {
+      item._audioChecked = true;
+      if (typeof video.webkitAudioDecodedByteCount === 'number' && video.webkitAudioDecodedByteCount === 0 &&
+          !video.muted && video.volume > 0 && VIDEO_EXT.test(item.fullName || '')) {
+        fallbackToMpv('Audio codec not supported by browser engine');
+      }
+    }
+  });
   video.addEventListener('progress', updateBuffered);
   video.addEventListener('loadedmetadata', () => {
+    if (isMpv()) return;
     durationEl.textContent = formatTime(video.duration);
     loader.hidden = true;
-    // Restore position
-    if (rememberPos && currentIndex >= 0) {
-      try {
-        const pos = parseFloat(localStorage.getItem('zephyr-pos-' + playlist[currentIndex].fullName));
-        if (pos > 5 && pos < video.duration - 5) video.currentTime = pos;
-      } catch {}
-    }
+    const item = playlist[currentIndex];
+    // Video track the browser can't decode (HEVC/AV1/...): audio-only playback -> hand over to mpv.
+    if (item && video.videoWidth === 0 && VIDEO_EXT.test(item.fullName || '') && fallbackToMpv('Video codec not supported by browser engine')) return;
+    if (pendingStart > 5 && pendingStart < video.duration - 5) video.currentTime = pendingStart;
+    pendingStart = 0;
   });
-  video.addEventListener('waiting', () => { if (video.src) loader.hidden = false; });
-  video.addEventListener('canplay', () => loader.hidden = true);
-  video.addEventListener('ended', () => {
-    if (repeatMode === 2) { video.currentTime = 0; video.play(); return; }
-    if (autoNext || repeatMode === 1) {
-      let next = currentIndex + 1;
-      if (shuffle) next = Math.floor(Math.random() * playlist.length);
-      if (next >= playlist.length) next = repeatMode === 1 ? 0 : -1;
-      if (next >= 0) playIndex(next);
-      else { updatePlayIcon(false); bigPlay.hidden = false; }
-    } else {
-      updatePlayIcon(false); bigPlay.hidden = false;
-    }
+  video.addEventListener('waiting', () => {
+    if (!video.getAttribute('src')) return;
+    loader.hidden = false;
+    clearStall();
+    stallTimer = setTimeout(() => {
+      const item = playlist[currentIndex];
+      if (!isMpv() && item && item.path && video.readyState < 3 && !video.paused) fallbackToMpv('Playback stalled');
+    }, 15000);
   });
+  video.addEventListener('canplay', () => { loader.hidden = true; clearStall(); });
+  video.addEventListener('ended', () => { if (!isMpv()) handleEnded(); });
   video.addEventListener('error', () => {
     loader.hidden = true;
-    videoTitle.textContent = 'Cannot play this file';
-    videoSubtitle.textContent = 'Format may not be supported by the current engine';
-    showOSD('Playback error – try another format or add mpv later');
+    clearStall();
+    const item = playlist[currentIndex];
+    if (isMpv() || !item || !video.getAttribute('src')) return;
+    if (fallbackToMpv('Browser engine can\'t play this')) return;
+    showPlayError(mpvReady ? 'Cannot play this file' : 'Cannot play this file — place mpv.exe next to the app for full format support');
   });
   video.addEventListener('click', togglePlay);
   video.addEventListener('dblclick', toggleFullscreen);
@@ -554,8 +1201,8 @@
     bigPlay.hidden = true;
     togglePlay();
   });
-  prevBtn.addEventListener('click', () => playIndex(currentIndex - 1));
-  nextBtn.addEventListener('click', () => playIndex(currentIndex + 1));
+  prevBtn.addEventListener('click', () => step(-1));
+  nextBtn.addEventListener('click', () => step(1));
   muteBtn.addEventListener('click', toggleMute);
   volumeSlider.addEventListener('input', e => setVolume(parseFloat(e.target.value)));
   rewindBtn.addEventListener('click', () => seekRelative(-seekStep));
@@ -563,6 +1210,7 @@
   abLoopBtn.addEventListener('click', handleABLoop);
   screenshotBtn.addEventListener('click', takeScreenshot);
   fullscreenBtn.addEventListener('click', toggleFullscreen);
+  document.addEventListener('fullscreenchange', () => setBtnIcon(fullscreenBtn, document.fullscreenElement ? 'fullscreen-exit' : 'fullscreen'));
   pipBtn.addEventListener('click', togglePiP);
 
   speedBtn.addEventListener('click', e => { e.stopPropagation(); speedMenu.hidden = !speedMenu.hidden; positionMenu(speedMenu, speedBtn); });
@@ -578,16 +1226,18 @@
     if (!subMenu.hidden) positionMenu(subMenu, subBtn);
   });
   subMenu.querySelector('[data-action="off"]').addEventListener('click', () => {
-    subCues = []; subtitleDisplay.textContent = ''; subMenu.hidden = true; showOSD('Subtitles off');
+    subCues = []; subtitleDisplay.textContent = ''; lastSubText = ''; subMenu.hidden = true;
+    if (isMpv()) { selectedSid = 'no'; mpvSet('sid', 'no'); }
+    showOSD('Subtitles off');
   });
   subMenu.querySelector('[data-action="load"]').addEventListener('click', () => { subInput.click(); subMenu.hidden = true; });
   subInput.addEventListener('change', () => { if (subInput.files[0]) loadExternalSub(subInput.files[0]); subInput.value = ''; });
 
   audioBtn.addEventListener('click', e => {
     e.stopPropagation();
-    // HTML5 video has limited multi-audio support; show placeholder
-    const tracks = $('audioTracks');
-    tracks.innerHTML = '<button class="active">Default track</button>';
+    refreshHtml5Tracks();
+    subMenu.hidden = true;
+    speedMenu.hidden = true;
     audioMenu.hidden = !audioMenu.hidden;
     positionMenu(audioMenu, audioBtn);
   });
@@ -607,13 +1257,24 @@
     if (audioMenu) audioMenu.hidden = true;
   });
 
-  progressBar.addEventListener('mousedown', e => {
+  progressBar.addEventListener('pointerdown', e => {
+    if (e.button !== undefined && e.button !== 0) return;
+    if (!curDur()) return;
     isSeeking = true;
-    seekFromEvent(e);
-    const move = ev => seekFromEvent(ev);
-    const up = () => { isSeeking = false; document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
-    document.addEventListener('mousemove', move);
-    document.addEventListener('mouseup', up);
+    try { progressBar.setPointerCapture(e.pointerId); } catch {}
+    seekFromEvent(e, false);
+    const move = ev => seekFromEvent(ev, false);
+    const up = ev => {
+      seekFromEvent(ev, true);
+      isSeeking = false;
+      progressBar.removeEventListener('pointermove', move);
+      progressBar.removeEventListener('pointerup', up);
+      progressBar.removeEventListener('pointercancel', up);
+      try { progressBar.releasePointerCapture(ev.pointerId); } catch {}
+    };
+    progressBar.addEventListener('pointermove', move);
+    progressBar.addEventListener('pointerup', up);
+    progressBar.addEventListener('pointercancel', up);
   });
 
   fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
@@ -652,38 +1313,56 @@
 
   // Electron menu open
   if (window.electronAPI?.onOpenFiles) {
-    window.electronAPI.onOpenFiles(paths => { if (paths?.length) addNativePaths(paths); });
+    window.electronAPI.onOpenFiles(paths => { if (paths?.length) addNativePaths(paths, { play: true }); });
   }
 
-  // Keyboard (VLC / PotPlayer style)
+  // Keyboard (VLC / PotPlayer style) — ONE dispatcher; customizable keys are resolved here too.
+  function typingTarget(t) {
+    const tag = t && t.tagName;
+    return tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || (t && t.isContentEditable);
+  }
   document.addEventListener('keydown', e => {
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-    const k = e.key.toLowerCase();
+    if (typingTarget(e.target) || e.altKey) return;
+    const hk = (typeof hotkeys === 'object' && hotkeys) || { play: ' ', full: 'f', mute: 'm', shot: 's', book: 'b' };
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
+    if (e.ctrlKey || e.metaKey) {
+      if (k === 'o') { e.preventDefault(); openFilesNative(); }
+      return;
+    }
+    if (k === hk.play || k === 'k') { e.preventDefault(); togglePlay(); return; }
+    if (k === hk.full) { e.preventDefault(); toggleFullscreen(); return; }
+    if (k === hk.mute) { e.preventDefault(); toggleMute(); return; }
+    if (k === hk.shot) { e.preventDefault(); takeScreenshot(); return; }
+    if (k === hk.book) { e.preventDefault(); if (typeof addBookmarkBtn !== 'undefined' && addBookmarkBtn) addBookmarkBtn.click(); return; }
     switch (k) {
-      case ' ': case 'k': e.preventDefault(); togglePlay(); break;
-      case 'arrowleft': seekRelative(e.shiftKey ? -30 : -seekStep); break;
-      case 'arrowright': seekRelative(e.shiftKey ? 30 : seekStep); break;
-      case 'arrowup': e.preventDefault(); setVolume(Math.min(1.5, parseFloat(volumeSlider.value) + 0.05)); break;
-      case 'arrowdown': e.preventDefault(); setVolume(Math.max(0, parseFloat(volumeSlider.value) - 0.05)); break;
-      case 'm': toggleMute(); break;
-      case 'f': toggleFullscreen(); break;
-      case 's': takeScreenshot(); break;
-      case 'p': if (e.shiftKey) playIndex(currentIndex - 1); break;
-      case 'n': if (e.shiftKey) playIndex(currentIndex + 1); break;
+      case 'arrowleft': e.preventDefault(); seekRelative(e.shiftKey ? -30 : -seekStep); break;
+      case 'arrowright': e.preventDefault(); seekRelative(e.shiftKey ? 30 : seekStep); break;
+      case 'arrowup': e.preventDefault(); setVolume(volumeLevel + 0.05); break;
+      case 'arrowdown': e.preventDefault(); setVolume(volumeLevel - 0.05); break;
+      case 'p': if (e.shiftKey) step(-1); break;
+      case 'n': if (e.shiftKey) step(1); break;
       case 'a': handleABLoop(); break;
       case 'r': cycleRepeat(); break;
-      case '[': setSpeed(Math.max(0.25, video.playbackRate - 0.25)); break;
-      case ']': setSpeed(Math.min(2, video.playbackRate + 0.25)); break;
-      case 'escape': if (document.fullscreenElement) document.exitFullscreen(); break;
+      case '[': setSpeed(speedRate - 0.25); break;
+      case ']': setSpeed(speedRate + 0.25); break;
+      case 'pageup': if (isMpv()) { e.preventDefault(); mpvCmd('add', 'chapter', -1); } break;
+      case 'pagedown': if (isMpv()) { e.preventDefault(); mpvCmd('add', 'chapter', 1); } break;
+      case 'i': if (isMpv() && e.shiftKey) mpvCmd('script-binding', 'stats/display-stats-toggle'); break;
+      case 'home': e.preventDefault(); seekTo(0); break;
+      case 'end': e.preventDefault(); { const d = curDur(); if (d) seekTo(d - 0.5); } break;
+      case 'escape': if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); break;
     }
-    if (e.ctrlKey && k === 'o') { e.preventDefault(); openFilesNative(); }
   });
 
   // Init
   const savedTheme = localStorage.getItem('zephyr-theme') || 'dark';
   document.documentElement.setAttribute('data-theme', savedTheme);
-  setVolume(1);
+  { const sv = parseFloat(lsGet('zephyr-volume')); setVolume(isFinite(sv) ? sv : 1, { silent: true }); }
+  shuffle = lsGet('zephyr-shuffle') === '1';
+  repeatMode = parseInt(lsGet('zephyr-repeat') || '0', 10) || 0;
+  paintShuffle(); paintRepeat(); updateMuteIcon();
   renderPlaylist();
+  restorePlaylist();
 
   // ===== mpv as main engine =====
   const mpvPlayBtn = document.getElementById('mpvPlayBtn');
@@ -714,61 +1393,53 @@
     }
   }
 
-  async function playWithMpv(files, quality) {
-    if (typeof reportEmbedBounds === "function") reportEmbedBounds();
-    if (!window.electronAPI) return false;
-    const list = Array.isArray(files) ? files : [files];
-    const q = quality || getQuality();
-    if (window.electronAPI.mpvPlayExternal) {
-      const res = await window.electronAPI.mpvPlayExternal({
-        files: list,
-        quality: q,
-        embed: true,
-        vo: localStorage.getItem('zephyr-settingVo') || 'gpu',
-        hwdec: localStorage.getItem('zephyr-settingHwdec') || 'auto',
-        perf: localStorage.getItem('zephyr-settingPerf') || 'smooth'
-      });
-      if (res && res.ok) {
-        showOSD(res.embedded ? 'mpv embedded · ' + q : 'mpv · ' + q);
-        return true;
+  // Play a local file with mpv: always through the playlist so the UI stays bound to it.
+  async function playWithMpv(files) {
+    const list = (Array.isArray(files) ? files : [files]).filter(Boolean);
+    const p = list[0];
+    if (!p) return false;
+    let idx = playlist.findIndex(i => i.path === p);
+    if (idx < 0) { await addNativePaths([p]); idx = playlist.findIndex(i => i.path === p); }
+    if (idx < 0) return false;
+    playlist[idx].forceMpv = true;
+    playIndex(idx, { startPos: idx === currentIndex ? curTime() : undefined, noHistory: idx === currentIndex });
+    return true;
+  }
+
+  const isPlaylistUrl = (u) => /[?&]list=/.test(u) && !/[?&]v=/.test(u) || /\/playlist\?|\/(channel|c|user|@[^/]+)(\/(videos|streams))?\/?$/i.test(u);
+  async function playStream(url) {
+    const u = String(url || '').trim();
+    if (!u) { showOSD('Paste a URL first'); return; }
+    if (!mpvReady) { showOSD('mpv (and yt-dlp for YouTube) must be next to the app for URLs', 3000); return; }
+    if (isPlaylistUrl(u) && api() && api().ytdlpPlaylist) {
+      showOSD('Reading playlist…', 4000);
+      const r = await api().ytdlpPlaylist(u, lsGet('zephyr-ytCookies') || '').catch(() => null);
+      if (r && r.ok && r.entries.length) {
+        const first = playlist.length;
+        r.entries.forEach(e => { if (!playlist.some(i => i.stream && i.url === e.url)) playlist.push(makeStreamItem(e.url, e.title, e.duration)); });
+        renderPlaylist(); savePlaylistSoon();
+        showOSD(r.entries.length + ' videos added' + (r.title ? ' from “' + r.title + '”' : ''), 2500);
+        playIndex(Math.min(first, playlist.length - 1));
+        return;
       }
+      showOSD(r && r.error ? r.error : 'Could not read that playlist', 4000);
+      return;
     }
-    // Fallback IPC load
-    if (window.electronAPI.mpvLoad && list[0]) {
-      const res = await window.electronAPI.mpvLoad(list[0]);
-      if (res && res.ok) {
-        showOSD('mpv engine');
-        return true;
-      }
-    }
-    showOSD('mpv failed – check mpv.exe');
-    return false;
+    let idx = playlist.findIndex(i => i.stream && i.url === u);
+    if (idx < 0) { playlist.push(makeStreamItem(u)); idx = playlist.length - 1; }
+    renderPlaylist();
+    showOSD('Opening…');
+    playIndex(idx);
   }
 
   if (mpvPlayBtn) {
     mpvPlayBtn.addEventListener('click', async () => {
-      if (!mpvReady) {
-        showOSD('Place mpv.exe next to the app');
-        return;
-      }
-      const files = [];
-      if (currentIndex >= 0 && playlist[currentIndex]) {
-        const item = playlist[currentIndex];
-        if (item.path) files.push(item.path);
-      }
-      if (!files.length) {
-        // Try open dialog via electron
-        if (window.electronAPI.openFiles) {
-          const paths = await window.electronAPI.openFiles();
-          if (paths && paths.length) {
-            await playWithMpv(paths, 'high');
-            return;
-          }
-        }
-        showOSD('Open a local file first');
-        return;
-      }
-      await playWithMpv(files, 'high');
+      if (!mpvReady) { showOSD('Place mpv.exe next to the app'); return; }
+      const item = playlist[currentIndex];
+      if (!item) { showOSD('Open a file first'); return; }
+      if (isMpv()) { showOSD('Already playing with mpv'); return; }
+      item.forceMpv = true;
+      playIndex(currentIndex, { startPos: curTime(), noHistory: true });
     });
   }
 
@@ -785,10 +1456,7 @@
     }
     if (window.electronAPI.onOpenFilesMpv) {
       window.electronAPI.onOpenFilesMpv(async (paths) => {
-        if (paths && paths.length) {
-          addNativePaths(paths);
-          await playWithMpv(paths, 'high');
-        }
+        if (paths && paths.length) await playWithMpv(paths);
       });
     }
   }
@@ -821,27 +1489,10 @@
   if (cancelUrlBtn) cancelUrlBtn.addEventListener('click', closeUrl);
   if (closeUrlPanel) closeUrlPanel.addEventListener('click', closeUrl);
   if (playUrlBtn) {
-    playUrlBtn.addEventListener('click', async () => {
+    playUrlBtn.addEventListener('click', () => {
       const url = (urlInput && urlInput.value || '').trim();
-      if (!url) { showOSD('Paste a URL first'); return; }
       closeUrl();
-      if (!window.electronAPI || !window.electronAPI.mpvPlayUrl) {
-        showOSD('mpv required for URLs');
-        return;
-      }
-      showOSD('Opening…');
-      const res = await window.electronAPI.mpvPlayUrl(url, getQuality(), true);
-      if (res && res.ok) {
-        showOSD(res.embedded ? 'Playing (embedded mpv)' : 'Playing in mpv');
-        videoTitle.textContent = url.length > 60 ? url.slice(0, 57) + '…' : url;
-        videoSubtitle.textContent = 'Stream / YouTube';
-        dropZone.classList.add('hidden');
-      } else {
-        showOSD((res && res.error) ? String(res.error).slice(0, 80) : 'Failed to play URL');
-        if (res && res.error && res.error.includes('yt-dlp')) {
-          alert(res.error);
-        }
-      }
+      playStream(url);
     });
   }
   if (urlInput) {
@@ -890,10 +1541,27 @@
       text += 'File: ' + (it.fullName || it.path || '') + '\n';
       text += 'Size: ' + (it.size ? (it.size/1048576).toFixed(2) + ' MB' : '—') + '\n';
     }
-    if (video.videoWidth) {
+    if (!isMpv() && video.videoWidth) {
       text += 'Resolution: ' + video.videoWidth + '×' + video.videoHeight + '\n';
-      text += 'Duration: ' + formatTime(video.duration) + '\n';
     }
+    {
+      const it = playlist[currentIndex];
+      const i = it && it.info;
+      if (i) {
+        text += '\n--- File ---\n';
+        if (i.container) text += 'Container: ' + i.container + '\n';
+        if (i.hasVideo) text += 'Video: ' + i.width + '×' + i.height + ' ' + codecName(i.vcodec) + (i.vprofile ? ' (' + i.vprofile + ')' : '') + (i.fps ? ' @ ' + i.fps + ' fps' : '') + (i.bitDepth >= 10 ? ' · ' + i.bitDepth + '-bit' : '') + (i.hdr ? ' · ' + i.hdr : '') + '\n';
+        if (i.acodec) text += 'Audio: ' + codecName(i.acodec) + (i.achannels ? ' · ' + i.achannels + ' ch' : '') + (i.asamplerate ? ' · ' + i.asamplerate + ' Hz' : '') + (i.audioLangs && i.audioLangs.length ? ' · ' + i.audioLangs.join('/') : '') + '\n';
+        if (i.audioTracks > 1) text += 'Audio tracks: ' + i.audioTracks + '\n';
+        if (i.subTracks) text += 'Subtitle tracks: ' + i.subTracks + (i.subLangs && i.subLangs.length ? ' (' + i.subLangs.join('/') + ')' : '') + '\n';
+        if (i.chapters) text += 'Chapters: ' + i.chapters + '\n';
+        if (i.bitrate) text += 'Bitrate: ' + Math.round(i.bitrate / 1000) + ' kbps\n';
+        if (i.title) text += 'Title tag: ' + i.title + '\n';
+        if (i.artist) text += 'Artist: ' + i.artist + (i.album ? ' · ' + i.album : '') + '\n';
+        text += 'Browser engine: ' + (browserCanPlay(i) ? 'can play' : 'cannot decode this → mpv') + '\n';
+      }
+    }
+    if (curDur()) text += 'Duration: ' + formatTime(curDur()) + '\n';
     if (window.electronAPI && window.electronAPI.mpvGetMediaInfo) {
       try {
         const res = await window.electronAPI.mpvGetMediaInfo();
@@ -902,7 +1570,20 @@
           text += 'mpv: ' + (res.info.mpv || '—') + '\n';
           text += 'yt-dlp: ' + (res.info.ytdlp || '—') + '\n';
           text += 'Quality: ' + (res.info.quality || '—') + '\n';
-          if (res.info.source) text += 'Source: ' + JSON.stringify(res.info.source) + '\n';
+          text += 'Window mode: ' + (res.info.embed ? 'embedded' : 'separate') + (res.info.level ? ' (safe mode ' + res.info.level + ')' : '') + '\n';
+          const d = res.info.details;
+          if (d) {
+            text += '\n--- Playback (mpv) ---\n';
+            const vp = d['video-params'] || {};
+            if (vp.w) text += 'Video: ' + vp.w + '×' + vp.h + ' ' + (d['video-codec'] || '') + (d['container-fps'] ? ' @ ' + Number(d['container-fps']).toFixed(2) + ' fps' : '') + '\n';
+            if (vp.pixelformat) text += 'Pixel format: ' + vp.pixelformat + (vp.colormatrix ? ' · ' + vp.colormatrix : '') + (vp.gamma ? ' · ' + vp.gamma : '') + '\n';
+            if (d['audio-codec-name']) { const ap = d['audio-params'] || {}; text += 'Audio: ' + d['audio-codec-name'] + (ap.samplerate ? ' · ' + ap.samplerate + ' Hz' : '') + (ap['hr-channels'] ? ' · ' + ap['hr-channels'] : '') + '\n'; }
+            if (d['file-format']) text += 'Container: ' + d['file-format'] + '\n';
+            if (d['video-bitrate']) text += 'Video bitrate: ' + Math.round(d['video-bitrate'] / 1000) + ' kbps\n';
+            if (d['hwdec-current']) text += 'Decoder: ' + d['hwdec-current'] + '\n';
+            if (d['current-vo']) text += 'Renderer: ' + d['current-vo'] + '\n';
+            if (d['frame-drop-count'] != null) text += 'Dropped frames: ' + d['frame-drop-count'] + '\n';
+          }
         }
       } catch {}
     }
@@ -1024,114 +1705,100 @@
   let subDelaySec = 0;
   let subScale = 1;
 
+  function trackLabel(t, n) {
+    const bits = [];
+    if (t.lang) bits.push(String(t.lang).toUpperCase());
+    if (t.title) bits.push(t.title);
+    if (t.codec) bits.push(t.codec);
+    if (t.type === 'audio' && t['demux-channel-count']) bits.push(t['demux-channel-count'] + 'ch');
+    if (t.external) bits.push('external');
+    return (bits.length ? bits.join(' · ') : (t.type === 'audio' ? 'Audio ' : 'Subtitle ') + n);
+  }
+
   function refreshHtml5Tracks() {
     const subTracksEl = document.getElementById('subTracks');
     const audioTracksEl = document.getElementById('audioTracks');
+    const mkBtn = (label, active, onClick) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      if (active) b.classList.add('active');
+      if (onClick) b.addEventListener('click', onClick); else b.disabled = true;
+      return b;
+    };
+
+    if (isMpv()) {
+      const subs = mp.tracks.filter(t => t.type === 'sub');
+      const auds = mp.tracks.filter(t => t.type === 'audio');
+      if (subTracksEl) {
+        subTracksEl.textContent = '';
+        if (!subs.length) subTracksEl.appendChild(mkBtn('No subtitle tracks', false, null));
+        subs.forEach((t, i) => subTracksEl.appendChild(mkBtn(trackLabel(t, i + 1), t.selected, async () => {
+          selectedSid = t.id; subMenu.hidden = true;
+          await mpvSet('sid', t.id);
+          showOSD('Subtitle: ' + trackLabel(t, i + 1));
+        })));
+      }
+      if (audioTracksEl) {
+        audioTracksEl.textContent = '';
+        if (!auds.length) audioTracksEl.appendChild(mkBtn('No audio tracks', false, null));
+        auds.forEach((t, i) => audioTracksEl.appendChild(mkBtn(trackLabel(t, i + 1), t.selected, async () => {
+          selectedAid = t.id; audioMenu.hidden = true;
+          await mpvSet('aid', t.id);
+          showOSD('Audio: ' + trackLabel(t, i + 1));
+        })));
+      }
+      return;
+    }
+
     if (subTracksEl) {
-      subTracksEl.innerHTML = '';
+      subTracksEl.textContent = '';
       const tracks = video.textTracks || [];
       let count = 0;
       for (let i = 0; i < tracks.length; i++) {
         const t = tracks[i];
         if (t.kind !== 'subtitles' && t.kind !== 'captions') continue;
         count++;
-        const btn = document.createElement('button');
-        btn.textContent = (t.label || t.language || ('Track ' + count));
-        btn.dataset.sid = String(i);
-        if (t.mode === 'showing') btn.classList.add('active');
-        btn.addEventListener('click', () => {
+        subTracksEl.appendChild(mkBtn(t.label || t.language || ('Track ' + count), t.mode === 'showing', () => {
           for (let j = 0; j < tracks.length; j++) tracks[j].mode = 'disabled';
           t.mode = 'showing';
           selectedSid = i;
           subMenu.hidden = true;
-          showOSD('Subtitle: ' + btn.textContent);
+          showOSD('Subtitle: ' + (t.label || t.language || ('Track ' + count)));
           refreshHtml5Tracks();
-        });
-        subTracksEl.appendChild(btn);
+        }));
       }
-      if (!count) {
-        const hint = document.createElement('button');
-        hint.disabled = true;
-        hint.textContent = subCues.length ? 'External SRT loaded' : 'No embedded subs';
-        subTracksEl.appendChild(hint);
-      }
+      if (subCues.length) subTracksEl.appendChild(mkBtn('External subtitles (' + subCues.length + ' cues)', true, null));
+      else if (!count) subTracksEl.appendChild(mkBtn(mpvReady ? 'None — .mkv/.avi files open in mpv with all tracks' : 'No embedded subs', false, null));
     }
     if (audioTracksEl) {
-      audioTracksEl.innerHTML = '';
-      // HTML5 audioTracks support is limited in Chromium
+      audioTracksEl.textContent = '';
       const at = video.audioTracks;
-      if (at && at.length) {
+      if (at && at.length > 1) {
         for (let i = 0; i < at.length; i++) {
           const t = at[i];
-          const btn = document.createElement('button');
-          btn.textContent = t.label || t.language || ('Audio ' + (i + 1));
-          if (t.enabled) btn.classList.add('active');
-          btn.addEventListener('click', () => {
+          audioTracksEl.appendChild(mkBtn(t.label || t.language || ('Audio ' + (i + 1)), t.enabled, () => {
             for (let j = 0; j < at.length; j++) at[j].enabled = (j === i);
-            selectedAid = i + 1;
             audioMenu.hidden = true;
-            showOSD('Audio: ' + btn.textContent);
-            if (window.electronAPI && window.electronAPI.mpvSetTracks) {
-              window.electronAPI.mpvSetTracks({ aid: selectedAid });
-            }
+            showOSD('Audio: ' + (t.label || t.language || ('Audio ' + (i + 1))));
             refreshHtml5Tracks();
-          });
-          audioTracksEl.appendChild(btn);
+          }));
         }
       } else {
-        // Offer track numbers for mpv relaunch
-        for (let i = 1; i <= 4; i++) {
-          const btn = document.createElement('button');
-          btn.textContent = 'Audio track ' + i + (i === 1 ? ' (default)' : '');
-          if (selectedAid == i || (selectedAid === 'auto' && i === 1)) btn.classList.add('active');
-          btn.addEventListener('click', async () => {
-            selectedAid = i;
+        audioTracksEl.appendChild(mkBtn('Default audio', true, null));
+        if (mpvReady && playlist[currentIndex] && playlist[currentIndex].path) {
+          audioTracksEl.appendChild(mkBtn('Switch to mpv for all audio tracks', false, () => {
             audioMenu.hidden = true;
-            showOSD('Audio track ' + i);
-            if (window.electronAPI && window.electronAPI.mpvSetTracks) {
-              await window.electronAPI.mpvSetTracks({ aid: i, sid: selectedSid, subDelay: subDelaySec, subScale });
-            }
-            refreshHtml5Tracks();
-          });
-          audioTracksEl.appendChild(btn);
+            const it = playlist[currentIndex];
+            it.forceMpv = true;
+            playIndex(currentIndex, { startPos: curTime(), noHistory: true });
+          }));
         }
-        const note = document.createElement('button');
-        note.disabled = true;
-        note.textContent = 'mpv: switch reloads with --aid';
-        audioTracksEl.appendChild(note);
       }
     }
   }
 
-  // Override sub menu open to refresh tracks
-  if (subBtn) {
-    subBtn.addEventListener('click', () => {
-      refreshHtml5Tracks();
-      // also offer sid 1-4 for mpv
-      const subTracksEl = document.getElementById('subTracks');
-      if (subTracksEl && window.electronAPI) {
-        const existing = subTracksEl.querySelector('[data-mpv-sid]');
-        if (!existing) {
-          for (let i = 1; i <= 4; i++) {
-            const btn = document.createElement('button');
-            btn.dataset.mpvSid = String(i);
-            btn.textContent = 'mpv sub track ' + i;
-            btn.addEventListener('click', async () => {
-              selectedSid = i;
-              subMenu.hidden = true;
-              showOSD('Subtitle track ' + i);
-              if (window.electronAPI.mpvSetTracks) {
-                await window.electronAPI.mpvSetTracks({
-                  aid: selectedAid, sid: i, subDelay: subDelaySec, subScale
-                });
-              }
-            });
-            subTracksEl.appendChild(btn);
-          }
-        }
-      }
-    });
-  }
+  // Refresh the track lists whenever the sub menu opens
+  if (subBtn) subBtn.addEventListener('click', () => refreshHtml5Tracks());
 
   // Subtitle delay / size / position for on-screen display + mpv
   const subDelayEl = document.getElementById('subDelay');
@@ -1188,6 +1855,7 @@
       const v = parseInt(subPosEl.value, 10);
       if (subPosVal) subPosVal.textContent = v < 30 ? 'Bottom' : (v > 70 ? 'Top' : 'Mid');
       applySubStyle();
+      if (isMpv()) mpvSet('sub-pos', Math.round(100 - v * 0.9));
     });
   }
 
@@ -1258,23 +1926,35 @@
       bookmarkList.innerHTML = '<li style="color:var(--text-muted);cursor:default;">No bookmarks yet</li>';
       return;
     }
-    list.sort((a, b) => a.time - b.time).forEach((bm, idx) => {
+    list.sort((a, b) => a.time - b.time).forEach((bm) => {
       const li = document.createElement('li');
-      li.innerHTML = '<span class="bm-time">' + formatTime(bm.time) + '</span>' +
-        '<span class="bm-label">' + (bm.label || 'Bookmark') + '</span>' +
-        '<button class="bm-del" title="Delete">✕</button>';
+      const tm = document.createElement('span'); tm.className = 'bm-time'; tm.textContent = formatTime(bm.time);
+      const lb = document.createElement('span'); lb.className = 'bm-label'; lb.textContent = bm.label || 'Bookmark'; lb.title = 'Double-click to rename';
+      const del = document.createElement('button'); del.className = 'bm-del'; del.title = 'Delete'; del.textContent = '✕';
+      li.append(tm, lb, del);
       li.addEventListener('click', (e) => {
-        if (e.target.closest('.bm-del')) return;
-        video.currentTime = bm.time;
+        if (e.target.closest('.bm-del') || e.target.closest('input')) return;
+        seekTo(bm.time);
         showOSD('Bookmark ' + formatTime(bm.time));
         bookmarkPanel.hidden = true;
       });
-      li.querySelector('.bm-del').addEventListener('click', (e) => {
+      lb.addEventListener('dblclick', (e) => {
         e.stopPropagation();
-        const next = loadBookmarks().filter((_, i) => i !== idx);
-        // re-load sorted - safer filter by time+label
-        const all = loadBookmarks().filter(b => !(Math.abs(b.time - bm.time) < 0.05 && b.label === bm.label));
-        saveBookmarks(all);
+        const inp = document.createElement('input');
+        inp.value = bm.label || ''; inp.style.width = '100%';
+        lb.replaceWith(inp); inp.focus(); inp.select();
+        const commit = () => {
+          const all = loadBookmarks();
+          const hit = all.find(b => Math.abs(b.time - bm.time) < 0.05 && b.label === bm.label);
+          if (hit && inp.value.trim()) hit.label = inp.value.trim().slice(0, 80);
+          saveBookmarks(all); renderBookmarks();
+        };
+        inp.addEventListener('keydown', ev => { ev.stopPropagation(); if (ev.key === 'Enter') commit(); if (ev.key === 'Escape') renderBookmarks(); });
+        inp.addEventListener('blur', commit);
+      });
+      del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        saveBookmarks(loadBookmarks().filter(b => !(Math.abs(b.time - bm.time) < 0.05 && b.label === bm.label)));
         renderBookmarks();
         drawChapterAndBookmarkMarks();
       });
@@ -1291,10 +1971,11 @@
     }
     chapters.forEach((ch) => {
       const li = document.createElement('li');
-      li.innerHTML = '<span class="bm-time">' + formatTime(ch.time) + '</span>' +
-        '<span class="bm-label">' + (ch.title || 'Chapter') + '</span>';
+      const tm = document.createElement('span'); tm.className = 'bm-time'; tm.textContent = formatTime(ch.time);
+      const lb = document.createElement('span'); lb.className = 'bm-label'; lb.textContent = ch.title || 'Chapter';
+      li.append(tm, lb);
       li.addEventListener('click', () => {
-        video.currentTime = ch.time;
+        seekTo(ch.time);
         showOSD(ch.title || formatTime(ch.time));
         chapterPanel.hidden = true;
       });
@@ -1303,9 +1984,9 @@
   }
 
   function drawChapterAndBookmarkMarks() {
-    if (!chapterMarks || !video.duration) return;
+    const dur = curDur();
+    if (!chapterMarks || !dur) return;
     chapterMarks.innerHTML = '';
-    const dur = video.duration;
     chapters.forEach(ch => {
       const mark = document.createElement('div');
       mark.className = 'chapter-mark';
@@ -1324,6 +2005,7 @@
   }
 
   function extractChaptersFromTextTracks() {
+    if (isMpv()) { renderChapters(); drawChapterAndBookmarkMarks(); return; }
     chapters = [];
     try {
       const tracks = video.textTracks;
@@ -1356,7 +2038,7 @@
   }
 
   function showSeekPreview(clientX) {
-    if (!video.duration || !progressBar || !seekPreview) return;
+    if (isMpv() || !video.duration || !progressBar || !seekPreview) return;
     const rect = progressBar.getBoundingClientRect();
     let pct = (clientX - rect.left) / rect.width;
     pct = Math.max(0, Math.min(1, pct));
@@ -1445,28 +2127,19 @@
   if (closeChapters) closeChapters.addEventListener('click', () => { if (chapterPanel) chapterPanel.hidden = true; });
 
   if (addBookmarkBtn) addBookmarkBtn.addEventListener('click', () => {
-    if (!video.src || !video.duration) {
+    if (!hasMedia() || !curDur()) {
       showOSD('Nothing playing');
       return;
     }
-    const label = prompt('Bookmark label', 'Bookmark @ ' + formatTime(video.currentTime));
-    if (label === null) return;
+    // Electron has no window.prompt(); bookmarks get an automatic label (click the label in the list to rename)
+    const t = curTime();
     const list = loadBookmarks();
-    list.push({ time: video.currentTime, label: label || 'Bookmark' });
+    list.push({ time: t, label: 'Bookmark @ ' + formatTime(t) });
     saveBookmarks(list);
     renderBookmarks();
     drawChapterAndBookmarkMarks();
     showOSD('Bookmark saved');
   });
-
-  // Hotkey B = add bookmark
-  document.addEventListener('keydown', (e) => {
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-    if (e.key === 'b' || e.key === 'B') {
-      if (addBookmarkBtn) addBookmarkBtn.click();
-    }
-  });
-
   
   // ===== Batch 4: m3u playlist, mini player, tray =====
   const savePlaylistBtn = document.getElementById('savePlaylistBtn');
@@ -1581,10 +2254,8 @@
       if (key === 'playpause') togglePlay();
       if (key === 'next' && nextBtn) nextBtn.click();
       if (key === 'prev' && prevBtn) prevBtn.click();
-      if (key === 'stop') {
-        video.pause();
-        if (window.electronAPI && window.electronAPI.mpvStop) window.electronAPI.mpvStop();
-      }
+      if (key === 'stop') stopAll();
+      if (key === 'fullscreen') toggleFullscreen();
     });
   }
 
@@ -1685,7 +2356,7 @@
       if (qualitySelect.value === 'hdr') {
         showOSD('HDR tone-map mode');
       }
-      if (window.electronAPI && window.electronAPI.mpvSetQuality) {
+      if (isMpv() && window.electronAPI && window.electronAPI.mpvSetQuality) {
         const res = await window.electronAPI.mpvSetQuality(qualitySelect.value);
         if (res && res.ok) {
           showOSD('Quality: ' + qualitySelect.value + ' (restarting stream)');
@@ -1744,19 +2415,6 @@
     showOSD('Hotkeys saved');
   });
 
-  // Override key handling for customizable ones - add capture listener
-  document.addEventListener('keydown', (e) => {
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
-    const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-    const space = e.key === ' ' || e.code === 'Space';
-    if (space && hotkeys.play === ' ') { /* already handled by existing */ return; }
-    if (!space && key === hotkeys.play) { e.preventDefault(); togglePlay(); }
-    if (key === hotkeys.full) { e.preventDefault(); toggleFullscreen(); }
-    if (key === hotkeys.mute) { e.preventDefault(); toggleMute(); }
-    if (key === hotkeys.shot) { e.preventDefault(); takeScreenshot(); }
-    if (key === hotkeys.book && addBookmarkBtn) { e.preventDefault(); addBookmarkBtn.click(); }
-  }, true);
-
   // OpenSubtitles removed (local-only build)
 
 
@@ -1801,8 +2459,7 @@
           if (window.electronAPI && window.electronAPI.mpvStop) window.electronAPI.mpvStop();
           setTimeout(() => { try { window.close(); } catch {} }, 500);
         } else {
-          video.pause();
-          if (window.electronAPI && window.electronAPI.mpvStop) window.electronAPI.mpvStop();
+          stopAll();
           showOSD('Sleep timer – stopped');
         }
       }
@@ -1858,69 +2515,201 @@
   }
 
   
-  // ===== Batch 7: Stronger mpv embed =====
+  // ===== Batch 7: mpv embed surface =====
   const embedSelect = document.getElementById('embedSelect');
 
   function reportEmbedBounds() {
-    const wrap = document.getElementById('videoWrapper');
-    if (!wrap || !window.electronAPI || !window.electronAPI.setEmbedBounds) return;
-    const rect = wrap.getBoundingClientRect();
-    // screen coordinates
-    const x = rect.left + (window.screenX || window.screenLeft || 0);
-    const y = rect.top + (window.screenY || window.screenTop || 0);
-    // Electron: screenX includes frame; getBoundingClientRect is relative to client
-    // For BrowserWindow content, use electron API if we had it — approximate:
-    window.electronAPI.setEmbedBounds({
-      x: Math.round(rect.left),
-      y: Math.round(rect.top),
-      width: Math.round(rect.width),
-      height: Math.round(rect.height),
-      relative: true
-    });
+    const a = api();
+    if (!a || !a.setEmbedBounds || !videoWrapper) return;
+    const r = videoWrapper.getBoundingClientRect();
+    if (r.width < 10 || r.height < 10) return;
+    a.setEmbedBounds({ x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) });
   }
-
-  // More accurate bounds via requestAnimationFrame on resize
   let boundsTimer = null;
   function scheduleBounds() {
-    if (boundsTimer) clearTimeout(boundsTimer);
-    boundsTimer = setTimeout(reportEmbedBounds, 120);
+    if (boundsTimer) return;
+    boundsTimer = setTimeout(() => { boundsTimer = null; reportEmbedBounds(); }, 40);
   }
   window.addEventListener('resize', scheduleBounds);
-  window.addEventListener('move', scheduleBounds);
-  // Mutation-ish: when sidebar toggles
-  if (toggleSidebar) toggleSidebar.addEventListener('click', () => setTimeout(reportEmbedBounds, 300));
-  if (closeSidebar) closeSidebar.addEventListener('click', () => setTimeout(reportEmbedBounds, 300));
+  document.addEventListener('fullscreenchange', () => {
+    scheduleBounds();
+    setTimeout(reportEmbedBounds, 250);
+    // embedded mpv has no DOM controls in fullscreen -> let its own on-screen controller take over
+    if (isMpv() && mpvMode === 'child') mpvCmd('script-message', 'osc-visibility', document.fullscreenElement ? 'auto' : 'never', 'no-osd');
+  });
+  if (typeof ResizeObserver !== 'undefined' && videoWrapper) new ResizeObserver(scheduleBounds).observe(videoWrapper);
+  if (toggleSidebar) toggleSidebar.addEventListener('click', () => setTimeout(reportEmbedBounds, 320));
+  if (closeSidebar) closeSidebar.addEventListener('click', () => setTimeout(reportEmbedBounds, 320));
+
+  // Menus/panels are DOM; a native video window would cover them, so park it while any is open.
+  let embedSuspended = false;
+  function syncEmbedSuspension() {
+    const a = api();
+    if (!a || !a.setEmbedSuspended || !isMpv() || mpvMode !== 'child') return;
+    const open = !!document.querySelector('.settings-panel:not([hidden]), .popup-menu:not([hidden]), .library-view:not([hidden])');
+    if (open !== embedSuspended) { embedSuspended = open; a.setEmbedSuspended(open); }
+  }
+  new MutationObserver(syncEmbedSuspension).observe(document.body, { attributes: true, attributeFilter: ['hidden', 'class'], subtree: true });
 
   if (embedSelect) {
-    const saved = localStorage.getItem('zephyr-embed-mode');
-    if (saved) embedSelect.value = saved;
+    // one-time migration: the old default ("Full window") hid the whole UI behind the video
+    if (lsGet('zephyr-embed-v2') !== '1') {
+      lsSet('zephyr-embed-v2', '1');
+      const old = lsGet('zephyr-embed-mode');
+      if (!old || old === 'wid' || old === 'sync') lsSet('zephyr-embed-mode', 'off');
+    }
+    let saved = lsGet('zephyr-embed-mode');
+    if (saved === 'wid' || saved === 'sync') { saved = 'off'; lsSet('zephyr-embed-mode', 'off'); }
+    if (saved && Array.from(embedSelect.options).some(o => o.value === saved)) embedSelect.value = saved;
     embedSelect.addEventListener('change', async () => {
-      localStorage.setItem('zephyr-embed-mode', embedSelect.value);
-      if (window.electronAPI && window.electronAPI.setEmbedMode) {
-        await window.electronAPI.setEmbedMode(embedSelect.value);
-      }
+      lsSet('zephyr-embed-mode', embedSelect.value);
+      if (api() && api().setEmbedMode) await api().setEmbedMode(embedSelect.value);
       reportEmbedBounds();
-      showOSD('Embed: ' + embedSelect.value);
+      const item = playlist[currentIndex];
+      if (isMpv() && item) {
+        showOSD('Window mode: ' + embedSelect.options[embedSelect.selectedIndex].text + ' — reopening…', 2200);
+        playIndex(currentIndex, { startPos: curTime(), noHistory: true });
+      } else showOSD('Applies to the next mpv playback');
     });
-    // init
-    if (window.electronAPI && window.electronAPI.setEmbedMode) {
-      window.electronAPI.setEmbedMode(embedSelect.value);
+    if (api() && api().setEmbedMode) api().setEmbedMode(embedSelect.value);
+  }
+  reportEmbedBounds();
+
+  // ===== mpv -> UI synchronisation =====
+  function onMpvState(b) {
+    if (!isMpv() || !b) return;
+    for (const k of Object.keys(b)) {
+      const v = b[k];
+      switch (k) {
+        case 'time-pos':
+          if (typeof v === 'number') { mp.time = v; mp.active = true; if (loader.hidden === false && v > 0.2) loader.hidden = true; updateProgress(); }
+          break;
+        case 'duration':
+          mp.duration = (typeof v === 'number' && v > 0) ? v : 0;
+          durationEl.textContent = formatTime(mp.duration);
+          if (mp.duration) { onMediaMeta(); drawChapterAndBookmarkMarks(); }
+          break;
+        case 'pause':
+          mp.paused = !!v;
+          updatePlayIcon(!mp.paused);
+          if (!mp.paused) errorStreak = 0;
+          break;
+        case 'volume':
+          if (typeof v === 'number' && Math.abs(v / 100 - volumeLevel) > 0.005) {
+            volumeLevel = clamp(v / 100, 0, 1.5);
+            volumeSlider.value = volumeLevel;
+            updateMuteIcon();
+          }
+          break;
+        case 'mute':
+          userMuted = !!v;
+          updateMuteIcon();
+          break;
+        case 'speed':
+          if (typeof v === 'number') { speedRate = v; speedLabel.textContent = (Math.round(v * 100) / 100) + '×'; }
+          break;
+        case 'eof-reached':
+          if (v === true && !mp.eof) { mp.eof = true; handleEnded(); }
+          else if (v !== true) mp.eof = false;
+          break;
+        case 'track-list':
+          mp.tracks = Array.isArray(v) ? v : [];
+          refreshHtml5Tracks();
+          break;
+        case 'chapter-list':
+          chapters = (Array.isArray(v) ? v : []).map((c, i) => ({ time: c.time, title: c.title || ('Chapter ' + (i + 1)) }));
+          renderChapters();
+          drawChapterAndBookmarkMarks();
+          break;
+        case 'paused-for-cache':
+          loader.hidden = !v;
+          break;
+        case 'media-title': {
+          const it = playlist[currentIndex];
+          // streams arrive with a URL as the name; replace it with the real title as soon as mpv/yt-dlp knows it
+          if (it && it.stream && typeof v === 'string' && v && !/^https?:/i.test(v) && it.name !== v) {
+            it.name = v; it._renamed = true; videoTitle.textContent = v; updateRow(it); savePlaylistSoon();
+          }
+          break;
+        }
+        case 'ab-loop-a':
+          abLoop.a = typeof v === 'number' ? v : null;
+          if (abLoop.a === null) resetAB();
+          break;
+        case 'ab-loop-b':
+          if (typeof v === 'number') { abLoop.b = v; abLoop.active = abLoop.a !== null; updateABVisual(); } else abLoop.b = null;
+          break;
+      }
     }
   }
 
-  // Report bounds before mpv play
-  const _playWithMpvOrig = typeof playWithMpv === 'function' ? playWithMpv : null;
-  // Hook existing playWithMpv by wrapping calls - report bounds first
-  reportEmbedBounds();
-  setInterval(reportEmbedBounds, 2000);
-
-  // Visual hint when embed is on
-  if (embedSelect) {
-    const hint = document.createElement('div');
-    // no permanent overlay needed
+  function onMpvEvent(ev) {
+    if (!ev) return;
+    const item = playlist[currentIndex];
+    switch (ev.type) {
+      case 'file-loaded':
+        mp.active = true;
+        loader.hidden = true;
+        errorStreak = 0;
+        break;
+      case 'file-error':
+        if (!isMpv()) break;
+        if (item && item.path && !item._htmlTried && !item.stream) {
+          item._htmlTried = true;
+          engine = 'html5';
+          showOSD('mpv could not open this — trying browser engine', 2200);
+          startHtml5(item, mp.time, loadToken);
+        } else showPlayError(ev.error || 'Could not open this file');
+        break;
+      case 'recovering':
+        if (!isMpv()) break;
+        loader.hidden = false;
+        showOSD((ev.reason && /video/i.test(ev.reason) ? 'Fixing video output' : 'Player hiccup — recovering') + (ev.level ? ' (compatibility level ' + ev.level + ')' : '') + '…', 2800);
+        break;
+      case 'perf':
+        showOSD('Heavy video — switched to a lighter renderer for smooth playback', 3500);
+        break;
+      case 'failed':
+        if (!isMpv()) break;
+        if (item && item.path && !item._htmlTried && !item.stream) {
+          item._htmlTried = true;
+          engine = 'html5';
+          showOSD('mpv failed — switching to browser engine', 2500);
+          startHtml5(item, mp.time, loadToken);
+        } else { engine = 'html5'; mp.active = false; updatePlayIcon(false); showPlayError('mpv failed: ' + String(ev.error || 'unknown error').slice(0, 160)); }
+        break;
+      case 'closed': // the user closed the mpv window
+        if (!isMpv()) break;
+        savePosition();
+        engine = 'html5'; mp.active = false;
+        updatePlayIcon(false);
+        loader.hidden = true;
+        videoSubtitle.textContent = 'Closed — press play to resume';
+        bigPlay.hidden = false;
+        break;
+    }
   }
 
-  
+  if (api()) {
+    if (api().onMpvState) api().onMpvState(onMpvState);
+    if (api().onMpvEvent) api().onMpvEvent(onMpvEvent);
+    if (api().onWindowState) api().onWindowState(() => scheduleBounds());
+    if (api().onSubtitleProgress) api().onSubtitleProgress((p) => {
+      const el = document.getElementById('subAiStatus');
+      if (el && p && typeof p.percent === 'number') el.textContent = 'Generating subtitles… ' + p.percent + '%';
+    });
+  }
+
+  // Last line of defence: nothing in the UI should ever die silently or take the player with it.
+  window.addEventListener('error', (e) => { console.error('UI error:', e.message, e.filename, e.lineno); });
+  window.addEventListener('unhandledrejection', (e) => { console.error('UI rejection:', e.reason); e.preventDefault(); });
+
+  { const ck = document.getElementById('ytCookies');
+    if (ck) { ck.value = lsGet('zephyr-ytCookies') || ''; ck.addEventListener('change', () => lsSet('zephyr-ytCookies', ck.value)); } }
+
+  // right-click paste on the URL box (was an inline <script> in index.html; CSP now forbids those)
+  { const ui = document.getElementById('urlInput'); if (ui) ui.addEventListener('contextmenu', e => e.stopPropagation()); }
+
   // Global drag-drop fallback (whole window)
   document.addEventListener('dragover', e => { e.preventDefault(); });
   document.addEventListener('drop', e => {
@@ -2156,16 +2945,8 @@
   if (closeSubBrowse) closeSubBrowse.addEventListener('click', () => { if (subBrowsePanel) subBrowsePanel.hidden = true; });
 
   function cuesToSrt(cues) {
-    return cues.map((c, i) => {
-      const ts = (sec) => {
-        const h = Math.floor(sec / 3600);
-        const m = Math.floor((sec % 3600) / 60);
-        const s = Math.floor(sec % 60);
-        const ms = Math.floor((sec % 1) * 1000);
-        return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0') + ',' + String(ms).padStart(3,'0');
-      };
-      return (i + 1) + '\n' + ts(c.start) + ' --> ' + ts(c.end) + '\n' + (c.text || '') + '\n';
-    }).join('\n');
+    if (window.ZSub) return window.ZSub.toSrt(cues);
+    return cues.map((c, i) => (i + 1) + '\n' + formatTime(c.start) + ' --> ' + formatTime(c.end) + '\n' + (c.text || '') + '\n').join('\n');
   }
 
   function renderSubEditor() {
@@ -2181,7 +2962,7 @@
       tr.innerHTML = '<td>' + (i + 1) + '</td>' +
         '<td><input class="sub-time" data-i="' + i + '" data-f="start" value="' + c.start.toFixed(3) + '" /></td>' +
         '<td><input class="sub-time" data-i="' + i + '" data-f="end" value="' + c.end.toFixed(3) + '" /></td>' +
-        '<td><input data-i="' + i + '" data-f="text" value="' + String(c.text || '').replace(/"/g, '&quot;') + '" /></td>' +
+        '<td><input data-i="' + i + '" data-f="text" value="' + esc(c.text || '') + '" /></td>' +
         '<td><button type="button" data-jump="' + i + '">▶</button></td>';
       body.appendChild(tr);
     });
@@ -2198,7 +2979,7 @@
     body.querySelectorAll('[data-jump]').forEach(btn => {
       btn.addEventListener('click', () => {
         const i = parseInt(btn.getAttribute('data-jump'), 10);
-        if (subCues[i]) video.currentTime = subCues[i].start;
+        if (subCues[i]) seekTo(subCues[i].start);
       });
     });
   }
@@ -2285,21 +3066,8 @@
     try {
       const res = await window.electronAPI.generateLocalSubs(mediaPath, model);
       if (res && res.ok && res.content) {
-        // parse SRT into subCues
-        const blocks = res.content.replace(/\r/g, '').split(/\n\n+/);
-        const cues = [];
-        blocks.forEach(block => {
-          const lines = block.trim().split('\n');
-          if (lines.length < 2) return;
-          let idx = 0;
-          if (/^\d+$/.test(lines[0].trim())) idx = 1;
-          const times = lines[idx] || '';
-          const tm = times.match(/(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)/);
-          if (!tm) return;
-          const toSec = (h,m,s,ms) => (+h)*3600+(+m)*60+(+s)+(+ms)/1000;
-          const text = lines.slice(idx + 1).join('\n');
-          cues.push({ start: toSec(tm[1],tm[2],tm[3],tm[4]), end: toSec(tm[5],tm[6],tm[7],tm[8]), text });
-        });
+        const cues = window.ZSub ? window.ZSub.parse(res.content) : [];
+        if (isMpv() && res.srtPath) mpvCmd('sub-add', res.srtPath, 'select');
         subCues = cues;
         cacheSubsForCurrent();
         renderSubEditor();
@@ -2525,10 +3293,16 @@
   }
 
   // save duration when known
-  video.addEventListener('loadedmetadata', () => {
+  function noteDuration() {
+    const it = playlist[currentIndex];
+    const d = curDur();
+    if (it && d > 0 && Math.abs((it.duration || 0) - d) > 1 && !(it.info && it.info.duration)) { it.duration = d; updateRow(it); savePlaylistSoon(); }
+  }
+  function onMediaMeta() {
+    noteDuration();
     if (currentIndex >= 0 && playlist[currentIndex]) {
       try {
-        localStorage.setItem('zephyr-dur-' + playlist[currentIndex].fullName, String(video.duration || 0));
+        localStorage.setItem('zephyr-dur-' + playlist[currentIndex].fullName, String(curDur() || 0));
       } catch {}
       const item = playlist[currentIndex];
       if (item.path) {
@@ -2537,18 +3311,19 @@
           path: item.path,
           name: item.fullName || item.name,
           title: meta.title,
-          progress: watchedPctFor(item.path, video.duration)
+          progress: watchedPctFor(item.path, curDur())
         });
         // update library progress
         const lib = loadLib();
         const ix = lib.findIndex(x => x.path === item.path);
         if (ix >= 0) {
-          lib[ix].progress = watchedPctFor(item.path, video.duration);
+          lib[ix].progress = watchedPctFor(item.path, curDur());
           saveLib(lib);
         }
       }
     }
-  });
+  }
+  video.addEventListener('loadedmetadata', onMediaMeta);
 
   function renderLibraryList(list, containerId) {
     const el = document.getElementById(containerId);
@@ -2575,21 +3350,17 @@
       const div = document.createElement('div');
       div.className = 'lib-card';
       const poster = item.poster
-        ? '<img class="lib-poster" src="' + item.poster + '" alt="" />'
+        ? '<img class="lib-poster" src="' + esc(item.poster) + '" alt="" />'
         : '<div class="lib-poster"></div>';
       let line2 = '';
       if (meta.isTv) line2 = 'S' + meta.season + 'E' + meta.episode + (item.year ? ' · ' + item.year : '');
       else line2 = (meta.year || '') + (item.size ? (meta.year ? ' · ' : '') + formatSize(item.size) : '');
       div.innerHTML = poster +
-        '<div class="lib-info"><div class="lib-title">' + (item.title || meta.title || item.name) + '</div>' +
+        '<div class="lib-info"><div class="lib-title">' + esc(item.title || meta.title || item.name) + '</div>' +
         '<div class="lib-meta">' + line2 + (pct ? ' · ' + pct + '%' : '') + '</div>' +
         '<div class="lib-progress"><span style="width:' + pct + '%"></span></div></div>';
       div.addEventListener('click', () => {
-        if (item.path) {
-          addNativePaths([item.path]);
-          const i = playlist.findIndex(p => p.path === item.path);
-          if (i >= 0) playIndex(i);
-        }
+        if (item.path) addNativePaths([item.path], { play: true });
       });
       return div;
     }
@@ -2698,9 +3469,19 @@
   const assApplyBtn = document.getElementById('assApplyBtn');
   if (assApplyBtn) assApplyBtn.addEventListener('click', async () => {
     applyAssStyleLocal();
-    const scale = parseInt((document.getElementById('assScale') || {}).value || 100, 10) / 100;
-    if (window.electronAPI && window.electronAPI.mpvSetTracks) {
-      await window.electronAPI.mpvSetTracks({ subScale: scale });
+    const g = (id, d) => { const el = document.getElementById(id); return el && el.value !== '' ? el.value : d; };
+    const scale = parseInt(g('assScale', 100), 10) / 100;
+    if (window.electronAPI && window.electronAPI.mpvSetProps) {
+      await window.electronAPI.mpvSetProps({
+        'sub-scale': scale,
+        'sub-color': g('assColor', '#FFFFFF'),
+        'sub-border-color': g('assOutline', '#000000'),
+        'sub-border-size': parseFloat(g('assOutlineW', 2)) || 0,
+        'sub-shadow-offset': parseFloat(g('assShadow', 1)) || 0,
+        'sub-back-color': (document.getElementById('assBack') || {}).checked ? '#99000000' : '#00000000',
+        'sub-bold': !!(document.getElementById('assBold') || {}).checked,
+        'sub-font': String(g('assFont', 'Sans')).slice(0, 60)
+      });
     }
     showOSD('Subtitle style applied');
   });
@@ -2712,24 +3493,30 @@
   // Advanced audio apply
   const audAdvApplyBtn = document.getElementById('audAdvApplyBtn');
   if (audAdvApplyBtn) audAdvApplyBtn.addEventListener('click', async () => {
-    if (!window.electronAPI || !window.electronAPI.mpvPlayExternal) {
-      showOSD('mpv required');
+    if (!window.electronAPI || !window.electronAPI.mpvSetProps) { showOSD('mpv required'); return; }
+    const val = (id) => (document.getElementById(id) || {}).value;
+    const chk = (id) => !!(document.getElementById(id) || {}).checked;
+    const prefs = {
+      replaygain: val('audReplayGain'), delay: val('audDelay'), channels: val('audChannels'),
+      downmix: chk('audDownmix'), bitstream: chk('audBitstream'), vis: val('audVis')
+    };
+    lsSet('zephyr-audio-adv', JSON.stringify(prefs));
+    const hasVideo = mp.tracks.some(t => t.type === 'video' && !t.albumart);
+    const wantVis = prefs.vis && prefs.vis !== 'no';
+    const props = {
+      'replaygain': ['no', 'track', 'album'].includes(prefs.replaygain) ? prefs.replaygain : 'no',
+      'audio-delay': clamp(parseFloat(prefs.delay) || 0, -5, 5),
+      'audio-channels': prefs.downmix ? 'stereo' : (prefs.channels || 'auto'),
+      'audio-spdif': prefs.bitstream ? 'ac3,eac3,dts,dts-hd,truehd' : ''
+    };
+    if (wantVis && !hasVideo && ['showcqt', 'avectorscope'].includes(prefs.vis)) props['lavfi-complex'] = '[aid1]asplit[ao][a];[a]' + prefs.vis + '[vo]';
+    else props['lavfi-complex'] = '';
+    if (!isMpv()) {
+      showOSD('Saved — applies when a file plays in mpv');
       return;
     }
-    // Stash prefs; next playWithMpv could read them — apply by reopening current
-    const prefs = {
-      replaygain: (document.getElementById('audReplayGain') || {}).value,
-      delay: (document.getElementById('audDelay') || {}).value,
-      channels: (document.getElementById('audChannels') || {}).value,
-      downmix: !!(document.getElementById('audDownmix') || {}).checked,
-      bitstream: !!(document.getElementById('audBitstream') || {}).checked,
-      vis: (document.getElementById('audVis') || {}).value
-    };
-    localStorage.setItem('zephyr-audio-adv', JSON.stringify(prefs));
-    showOSD('Audio prefs saved – re-open with mpv');
-    if (currentIndex >= 0 && playlist[currentIndex] && playlist[currentIndex].path) {
-      await playWithMpv([playlist[currentIndex].path], getQuality());
-    }
+    const res = await window.electronAPI.mpvSetProps(props);
+    showOSD(res && res.ok ? (wantVis && hasVideo ? 'Audio applied (visualizer is for audio-only files)' : 'Audio settings applied') : 'Some audio settings were rejected by mpv');
   });
 
   // Network open
@@ -2737,15 +3524,8 @@
   if (networkOpenBtn) networkOpenBtn.addEventListener('click', async () => {
     const pathVal = ((document.getElementById('networkPath') || {}).value || '').trim();
     if (!pathVal) { showOSD('Enter a path or URL'); return; }
-    if (/^https?:|^rtsp:|^rtsps:|^udp:|^smb:/i.test(pathVal)) {
-      if (window.electronAPI && window.electronAPI.mpvPlayUrl) {
-        await window.electronAPI.mpvPlayUrl(pathVal, getQuality(), true);
-        showOSD('Opening stream');
-      } else {
-        playlist.push({ name: pathVal, fullName: pathVal, url: pathVal, size: 0, type: '', path: null });
-        renderPlaylist();
-        playIndex(playlist.length - 1);
-      }
+    if (/^https?:|^rtsp:|^rtsps:|^rtmp:|^mms:|^udp:|^smb:/i.test(pathVal) && !/^smb:/i.test(pathVal)) {
+      playStream(pathVal);
     } else {
       // UNC or local path
       addNativePaths([pathVal.replace(/^smb:/i, '')]);
@@ -2841,8 +3621,5 @@ if (pasteUrlBtn && urlInput) {
     }
   });
 
-  function needsMpvContainer(fullName) {
-  return /\.(ts|m2ts|mts|wmv|flv|mpg|mpeg|asf|rm|rmvb|vob|divx|mkv|avi|mov|m4v|webm)$/i.test(fullName || '');
-}
 })();
 

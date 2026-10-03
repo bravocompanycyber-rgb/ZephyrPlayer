@@ -31,3 +31,7 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# ZephyrPlayer external tools (run setup-tools.ps1 to fetch them)
+*.exe
+*.dll

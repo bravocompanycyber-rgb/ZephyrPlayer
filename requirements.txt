@@ -1,0 +1,45 @@
+Required (playback won't work without these)
+File	What it's for	Where to get it
+mpv.exe	Plays mkv, HEVC/x265, AC3 and everything else. Use a Windows build.	github.com/shinchiro/mpv-winbuild-cmake/releases (get the mpv-x86_64-…7z file)
+yt-dlp.exe	YouTube and other site links	github.com/yt-dlp/yt-dlp/releases/latest (get yt-dlp.exe)
+deno.exe	JavaScript runtime that yt-dlp now needs for YouTube	github.com/denoland/deno/releases (get deno-x86_64-pc-windows-msvc.zip and take deno.exe out)
+Needed for the new playlist features
+File	What it's for	Where to get it
+ffmpeg\ffmpeg.exe	Poster frames in the playlist, Whisper audio extraction, convert and record	gyan.dev/ffmpeg/builds (get the "release essentials" zip)
+ffmpeg\ffprobe.exe	Fast duration and codec detection	Same zip, in its bin folder. Without it, detection falls back to mpv and is slower.
+
+The ffmpeg and ffmpeg\bin folders both work.
+
+Optional
+File	What it's for	Where to get it
+whisper-cli.exe plus whisper.dll, ggml.dll, ggml-base.dll, ggml-cpu-x64.dll	Local AI subtitles. Keep the DLLs beside the exe, as in your current folder.	github.com/ggml-org/whisper.cpp/releases (get whisper-bin-x64.zip)
+models\ggml-base.bin	The Whisper model. Other sizes use ggml-small.bin, ggml-medium.bin and so on.	huggingface.co/ggerganov/whisper.cpp (the Files tab)
+shaders\*.glsl	The "Anime4K" quality preset	github.com/bloc97/Anime4K (the glsl folder)
+vulkan-1.dll	You already have this. Keep it beside mpv.exe.	
+Folder layout when it's all in place
+ZephyrPlayer\
+  mpv.exe  yt-dlp.exe  deno.exe
+  ffmpeg\ffmpeg.exe  ffmpeg\ffprobe.exe
+  whisper-cli.exe  whisper.dll  ggml*.dll
+  models\ggml-base.bin
+  shaders\*.glsl            (optional)
+Also on any new machine
+Install Node.js, then run npm install in the project folder. That downloads Electron into node_modules.
+Run npm start.
+Keeping them out of GitHub
+
+Add this to .gitignore:
+
+*.exe
+*.dll
+models/
+shaders/
+ffmpeg/
+node_modules/
+dist/
+releases/
+Checking it worked
+
+On startup the log prints which mpv, yt-dlp and JS runtime it found, and NOT FOUND for any that are missing. Use File ▸ Open log folder to read it. yt-dlp.exe also updates itself in place every few days, so don't be surprised when it changes.
+
+I can also write a TOOLS.md for the repo with this list, or a PowerShell script that downloads everything into the right folders. I haven't tested a script like that on Windows.

@@ -10,7 +10,7 @@ Built with Electron. Video is played by the browser engine when that is best, an
 ## 1. Quick start
 
 1. Install **Node.js LTS** (nodejs.org).
-2. Open a terminal in the project folder and run `setup-tools.bat` (downloads mpv, yt-dlp, deno, ffmpeg; see `TOOLS.md`), then `npm install`.
+2. Open a terminal in the project folder and run `setup-tools.bat` (downloads mpv, yt-dlp, deno, ffmpeg and whisper, then **tests that they really work**; see `TOOLS.md`), then `npm install`.
 3. Run `npm start`.
 4. Drop files or folders on the window, press **Ctrl+O**, or paste a link with the **URL** button.
 
@@ -60,7 +60,7 @@ They hide again a moment after you move away. The cursor hides when idle, and a 
 ## 5. Subtitles
 
 Auto-loads `.srt .vtt .ass .ssa` files next to the video (also non-UTF-8 files), plus all embedded tracks in mpv.
-Load more by dropping a subtitle file. **Generate subtitles with AI** (whisper, runs on your PC, optional) from the subtitle menu.
+Load more by dropping a subtitle file. **Generate subtitles with AI** (whisper, runs on your PC; installed by `setup-tools.bat`) from the subtitle menu.
 Delay, size and style are adjustable live.
 
 ## 6. Posters and info from the internet (optional)
@@ -113,7 +113,7 @@ Media keys on the keyboard also work. Screenshots go to `Pictures\ZephyrPlayer`.
 ## 10. Tools & health
 
 **Help > Tools & health** lists mpv, yt-dlp, deno, ffmpeg, ffprobe and whisper with versions and what each is for,
-can install or update the missing ones, and has **Copy diagnostics** (versions, GPU, tool paths, recent log; your user name is removed) for bug reports.
+can install or update the missing ones, **Run self-test** (encodes, decodes HEVC, starts the GPU renderer, resolves a real YouTube video, transcribes a spoken sentence with whisper) and **Copy diagnostics** (versions, GPU, tool paths, recent log; your user name is removed) for bug reports.
 A small banner appears at start if something essential is missing.
 
 ## 11. Troubleshooting
@@ -125,6 +125,8 @@ A small banner appears at start if something essential is missing.
 | YouTube says "sign in" / "not a bot" | In the URL panel choose your browser under **Use cookies from**. |
 | YouTube / link fails with a message | The message says why. Most often: File > **Update yt-dlp**, and make sure `deno.exe` is present (Tools & health). |
 | No playlist thumbnails | Install ffmpeg (Tools & health). |
+| A tool is installed but something fails | Tools & health > **Run self-test** (or `setup-tools.bat -TestOnly`): it tells you which tool fails and why. `-Force` reinstalls. |
+| AI subtitles do nothing | Run the self-test: it shows whether whisper starts, finds `models\ggml-base.bin`, and what it hears. |
 | No posters | Turn on online info in Settings; check the file name pattern; try Details > Look up again. |
 | A tool shows Missing after installing | Press Re-check; if you copied files by hand keep them in the project root (ffmpeg in `ffmpeg\`). |
 | Something else | Help > Copy diagnostics and paste it in your report. Logs: File > Open log folder. |

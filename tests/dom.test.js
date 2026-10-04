@@ -175,7 +175,9 @@ const key = (k, extra = {}) => w.document.dispatchEvent(new w.KeyboardEvent('key
   // -- shortcuts + welcome (first run) + tools panel
   key('?'); assert(!d.getElementById('shortcutsPanel').hidden && /Fullscreen/.test(d.getElementById('shortcutsBody').textContent)); d.getElementById('closeShortcuts').click();
   d.getElementById('toolsBtn').click(); await sleep(100); const trs = d.querySelectorAll('#toolsRows tr'); assert.strictEqual(trs.length, 3); assert(/✓/.test(trs[0].textContent) && /Missing/.test(trs[1].textContent) && /Optional/.test(trs[2].textContent), trs[1].textContent);
-  assert(!d.getElementById('healthBanner').hidden || true); d.getElementById('toolsInstall').click(); await sleep(100); assert(calls.some(c => c[0] === 'install')); d.getElementById('closeTools').click();
+  d.getElementById('toolsInstall').click(); await sleep(150); const ic = calls.find(c => c[0] === 'install'); assert(ic && ic[1].whisper === true && !ic[1].testOnly, 'install includes whisper by default');
+  calls.length = 0; d.getElementById('toolsTest').click(); await sleep(150); const tc = calls.find(c => c[0] === 'install'); assert(tc && tc[1].testOnly === true, 'self-test button runs the script in test-only mode'); assert(/Finished/.test(d.getElementById('toolsLog').textContent));
+  d.getElementById('closeTools').click();
   listeners.hotkey('diagnostics'); await sleep(30); assert(calls.some(c => c[0] === 'diag'));
   // -- A-B clip export (mpv engine)
   d.getElementById('clearPlaylistBtn').click(); await sleep(30); await listeners.open(['/m/clipme.mkv']); await sleep(1000); calls.length = 0;

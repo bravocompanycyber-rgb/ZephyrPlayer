@@ -35,3 +35,6 @@ Thumbs.db
 # ZephyrPlayer external tools (run setup-tools.ps1 to fetch them)
 *.exe
 *.dll
+
+# ZephyrPlayer external tools (run setup-tools.ps1 to fetch them)
+*.com

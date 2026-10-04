@@ -9,6 +9,14 @@
     tests/: optional test suite (node tests/run-all.js)
     package.json: if it has build.files, include the new root .js files, splash.html, setup-tools.ps1, README.md, TOOLS.md and assets/**
 
+## Update: tools that are proven, not just present
+- setup-tools.ps1 now installs whisper (exe + DLLs + the base speech model) by default and runs a self-test of every tool:
+  ffmpeg encodes H.264 and 10-bit HEVC+AC3, ffprobe reads them, mpv decodes both and starts its Direct3D 11 GPU renderer,
+  deno runs JS, yt-dlp resolves a real YouTube video with deno, whisper transcribes a spoken sentence (made with the Windows voice).
+  Results are PASS / WARN / FAIL with a reason; exit code 0 / 1 (download failed) / 2 (installed but broken). `-TestOnly` re-runs just the tests.
+- Tools & health got a **Run self-test** button (same tests) and installs whisper by default.
+- mpv.com is installed too so the mpv version can be shown (mpv.exe prints nothing to a console).
+
 ## New in v4
 - Fullscreen rebuilt: everything hides; mouse to the BOTTOM shows seek bar + buttons, RIGHT edge shows the playlist (or L), TOP shows the title.
   (Before, only the video was fullscreen, so controls and playlist were gone.) In the mpv window: bigger on-screen controller, < > and F8 for your playlist.

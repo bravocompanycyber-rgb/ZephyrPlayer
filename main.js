@@ -1545,7 +1545,8 @@ handle('tools:install', async (_e, opts) => {
   const script = path.join(__dirname, 'setup-tools.ps1');
   if (!fileExists(script)) return { ok: false, error: 'setup-tools.ps1 was not found next to the app' };
   const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-NoGitignore'];
-  if (opts && opts.whisper) args.push('-Whisper');
+  if (opts && opts.testOnly) args.push('-TestOnly');
+  if (!(opts && opts.whisper)) args.push('-SkipWhisper');      // the script installs whisper by default
   if (opts && opts.force) args.push('-Force');
   return new Promise((resolve) => {
     let tail = '';

@@ -347,7 +347,7 @@
         '<td class="muted tpath" title="' + esc(t.path || '') + '">' + esc((t.path || '').split(/[/\\]/).slice(-2).join('/')) + '</td>';
       rows.appendChild(tr);
     }
-    const btn = $('toolsInstall'); if (btn) { btn.disabled = !r.canInstall; btn.title = r.canInstall ? '' : 'Needs Windows and setup-tools.ps1 next to the app'; }
+    for (const id of ['toolsInstall', 'toolsTest']) { const btn = $(id); if (btn) { btn.disabled = !r.canInstall; btn.title = r.canInstall ? (id === 'toolsTest' ? 'Encodes, decodes, plays and transcribes real test data' : '') : 'Needs Windows and setup-tools.ps1 next to the app'; } }
     const note = $('toolsNote'); if (note) note.textContent = r.jsRuntime === 'electron-node' ? 'No deno.exe found: YouTube uses the built-in fallback runtime. Installing deno makes it more reliable.' : (r.canInstall ? '' : 'Automatic install is not available here. See TOOLS.md for the download list.');
     return r;
   }
@@ -359,19 +359,24 @@
   async function copyDiag() { if (!api() || !api().collectDiagnostics) return; const r = await api().collectDiagnostics().catch(() => null); A.showOSD(r && r.ok ? 'Diagnostics copied — paste them into your bug report' : 'Could not collect diagnostics', 3000); }
   on($('toolsDiag'), 'click', copyDiag);
   let installing = false;
-  on($('toolsInstall'), 'click', async () => {
+  async function runToolsJob(opts, startLabel, doneLabel) {
     if (installing || !api() || !api().toolsInstall) return;
     installing = true;
-    const btn = $('toolsInstall'), log = $('toolsLog');
-    btn.disabled = true; btn.textContent = 'Installing… (this can take a few minutes)';
+    const bi = $('toolsInstall'), bt = $('toolsTest'), log = $('toolsLog');
+    const labelI = bi.textContent, labelT = bt ? bt.textContent : '';
+    bi.disabled = true; if (bt) bt.disabled = true;
+    (opts.testOnly ? bt : bi).textContent = startLabel;
     log.hidden = false; log.textContent = '';
-    const r = await api().toolsInstall({ whisper: !!($('toolsWhisper') || {}).checked }).catch((e) => ({ ok: false, error: e && e.message }));
-    installing = false; btn.textContent = 'Install / update missing tools';
-    log.textContent += '\n' + (r && r.ok ? 'Finished.' : 'Finished with problems: ' + ((r && (r.error || r.tail)) || '')) + '\n';
+    const r = await api().toolsInstall(opts).catch((e) => ({ ok: false, error: e && e.message }));
+    installing = false; bi.textContent = labelI; if (bt) { bt.textContent = labelT; bt.disabled = false; }
+    log.textContent += '\n' + (r && r.ok ? 'Finished: everything passed.' : 'Finished with problems (see the FAIL / WARN lines above).' + ((r && r.error) ? ' ' + r.error : '')) + '\n';
+    log.scrollTop = log.scrollHeight;
     const st = await refreshTools();
-    if (st) { const mpv = st.tools.find((t) => t.name === 'mpv'); A.setMpvReady(!!(mpv && mpv.path)); }
-    A.showOSD(r && r.ok ? 'Tools installed' : 'Some tools could not be installed — see the log', 3000);
-  });
+    if (st) { const mpv = st.tools.find((t) => t.name === 'mpv'); A.setMpvReady(!!(mpv && mpv.path)); bi.disabled = !st.canInstall; if (bt) bt.disabled = !st.canInstall; }
+    A.showOSD(r && r.ok ? doneLabel : 'Finished with problems — see the log', 3500);
+  }
+  on($('toolsInstall'), 'click', () => runToolsJob({ whisper: !!($('toolsWhisper') || {}).checked }, 'Installing… (a few minutes)', 'Tools installed and verified'));
+  on($('toolsTest'), 'click', () => runToolsJob({ testOnly: true, whisper: true }, 'Testing… (about a minute)', 'All tools passed the self-test'));
   if (api() && api().onToolsProgress) api().onToolsProgress((p) => { const log = $('toolsLog'); if (log && p && p.line) { log.hidden = false; log.textContent += p.line + '\n'; log.scrollTop = log.scrollHeight; } });
 
   // one gentle heads-up per session when something essential is missing

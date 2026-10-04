@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>ZephyrPlayer</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<style>
+  html,body{margin:0;height:100%;background:transparent;font-family:'Segoe UI',system-ui,sans-serif;color:#e8eef5;overflow:hidden;-webkit-user-select:none;user-select:none}
+  .card{position:absolute;inset:0;border-radius:22px;background:radial-gradient(120% 120% at 20% 0%,#16384d 0%,#0b0f14 62%);border:1px solid rgba(255,255,255,.08);
+        display:flex;flex-direction:column;align-items:center;justify-content:center;box-shadow:inset 0 0 60px rgba(56,189,248,.08)}
+  svg{width:112px;height:112px;filter:drop-shadow(0 8px 28px rgba(56,189,248,.35));animation:float 3.2s ease-in-out infinite}
+  .w1,.w2{stroke-dasharray:240;stroke-dashoffset:240;animation:draw 1.4s ease-out forwards}
+  .w2{animation-delay:.25s}
+  .tri{transform-origin:256px 256px;animation:pop .7s cubic-bezier(.2,1.4,.4,1) .35s both}
+  h1{margin:16px 0 2px;font-size:25px;font-weight:700;letter-spacing:.3px}
+  h1 b{color:#5eead4;font-weight:700}
+  .sub{font-size:12px;color:#8b9bb0;letter-spacing:.14em;text-transform:uppercase}
+  .bar{margin-top:22px;width:210px;height:3px;background:rgba(255,255,255,.08);border-radius:3px;overflow:hidden}
+  .bar i{display:block;height:100%;width:40%;background:linear-gradient(90deg,#5eead4,#38bdf8);border-radius:3px;animation:slide 1.15s ease-in-out infinite}
+  #st{margin-top:12px;font-size:11.5px;color:#8b9bb0;height:14px}
+  @keyframes draw{to{stroke-dashoffset:0}} @keyframes float{50%{transform:translateY(-5px)}}
+  @keyframes pop{from{transform:scale(.3);opacity:0}} @keyframes slide{0%{margin-left:-40%}100%{margin-left:100%}}
+</style></head>
+<body><div class="card">
+  <svg viewBox="0 0 512 512" aria-hidden="true">
+    <defs><linearGradient id="a" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5eead4"/><stop offset="1" stop-color="#38bdf8"/></linearGradient></defs>
+    <path class="w1" d="M120 150h232c34 0 34 52 0 52h-60" fill="none" stroke="url(#a)" stroke-width="30" stroke-linecap="round" opacity=".6"/>
+    <path class="w2" d="M392 362H160c-34 0-34-52 0-52h60" fill="none" stroke="url(#a)" stroke-width="30" stroke-linecap="round" opacity=".6"/>
+    <path class="tri" d="M214 196v120c0 12 13 19 23 13l98-60c9-6 9-20 0-26l-98-60c-10-6-23 1-23 13z" fill="url(#a)"/>
+  </svg>
+  <h1>Zephyr<b>Player</b></h1>
+  <div class="sub" id="ver">Starting</div>
+  <div class="bar"><i></i></div>
+  <div id="st">Starting…</div>
+</div>
+<script>
+  window.setStatus = function (t) { document.getElementById('st').textContent = t; };
+  window.setVersion = function (v) { document.getElementById('ver').textContent = 'Version ' + v; };
+</script></body></html>

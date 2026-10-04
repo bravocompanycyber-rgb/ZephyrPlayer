@@ -8,11 +8,12 @@ const {
   Tray,
   nativeImage,
   globalShortcut,
-  screen
+  screen,
+  net,
+  clipboard
 } = require('electron');
 
 const path = require('path');
-const net = require('net');
 const fs = require('fs');
 const { spawn, execSync, execFile } = require('child_process');
 
@@ -28,6 +29,8 @@ const { MpvController } = require('./mpv-controller');
 const { MpvSession } = require('./mpv-session');
 const mediaUtils = require('./media-utils');
 const { MediaProbe } = require('./media-probe');
+const { OnlineMeta, accentFromBitmap } = require('./online-meta');
+const mediaTools = require('./media-tools');
 const os = require('os');
 
 /* -------------------------------------------------------------------------- */
@@ -449,6 +452,95 @@ function ensureScreenshotDir() {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Small main-process settings (things needed before the UI exists)           */
+/* -------------------------------------------------------------------------- */
+
+const SETTINGS_DEFAULTS = { splash: true };
+let settingsCache = null;
+function settingsFile() { return path.join(app.getPath('userData'), 'settings.json'); }
+function getSettings() {
+  if (settingsCache) return settingsCache;
+  let saved = {};
+  try { saved = JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) || {}; } catch {}
+  settingsCache = Object.assign({}, SETTINGS_DEFAULTS, saved);
+  return settingsCache;
+}
+function setSetting(key, value) {
+  if (!Object.prototype.hasOwnProperty.call(SETTINGS_DEFAULTS, key)) return false;
+  getSettings()[key] = value;
+  try { fs.writeFileSync(settingsFile(), JSON.stringify(settingsCache)); } catch (e) { log('settings save failed:', e.message); }
+  return true;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Splash screen                                                              */
+/* -------------------------------------------------------------------------- */
+
+let splashWin = null;
+let splashShownAt = 0;
+
+function showSplash() {
+  if (!getSettings().splash) return;
+  try {
+    splashWin = new BrowserWindow({
+      width: 460, height: 300, frame: false, resizable: false, movable: false, minimizable: false, maximizable: false,
+      transparent: true, show: false, alwaysOnTop: true, skipTaskbar: true, center: true, hasShadow: false,
+      backgroundColor: '#00000000', webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false }
+    });
+    splashWin.once('ready-to-show', () => {
+      if (!splashWin || splashWin.isDestroyed()) return;
+      splashShownAt = Date.now();
+      splashWin.show();
+      setSplashStatus('Looking for your tools…', app.getVersion());
+    });
+    splashWin.on('closed', () => { splashWin = null; });
+    splashWin.loadFile(path.join(__dirname, 'splash.html')).catch(() => closeSplash());
+  } catch (e) { log('splash failed:', e.message); splashWin = null; }
+}
+function setSplashStatus(text, version) {
+  try {
+    if (!splashWin || splashWin.isDestroyed()) return;
+    let js = 'window.setStatus && window.setStatus(' + JSON.stringify(String(text)) + ');';
+    if (version) js += 'window.setVersion && window.setVersion(' + JSON.stringify(String(version)) + ');';
+    splashWin.webContents.executeJavaScript(js).catch(() => {});
+  } catch {}
+}
+function closeSplash() {
+  try { if (splashWin && !splashWin.isDestroyed()) splashWin.close(); } catch {}
+  splashWin = null;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Online posters / info (optional, free, keyless)                            */
+/* -------------------------------------------------------------------------- */
+
+let onlineSvc = null;
+function getOnline() {
+  if (!onlineSvc) {
+    let fetchImpl = null;
+    try { if (net && typeof net.fetch === 'function') fetchImpl = net.fetch.bind(net); } catch {}
+    if (!fetchImpl && typeof fetch === 'function') fetchImpl = fetch;
+    onlineSvc = new OnlineMeta({
+      fetchImpl, log,
+      cacheFile: path.join(app.getPath('userData'), 'online-cache.json'),
+      posterDir: path.join(app.getPath('userData'), 'posters')
+    });
+  }
+  return onlineSvc;
+}
+
+function posterAccent(file) {
+  try {
+    const img = nativeImage.createFromPath(file);
+    if (img.isEmpty()) return null;
+    const small = img.resize({ width: 24, height: 24, quality: 'good' });
+    const { width, height } = small.getSize();
+    const bmp = small.toBitmap();
+    return width && height ? accentFromBitmap(bmp, true) : null;
+  } catch { return null; }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Embedded video surface (child window that follows the player area)         */
 /* -------------------------------------------------------------------------- */
 
@@ -560,6 +652,9 @@ function getSession() {
   session.on('perf', (info) => safeSend('mpv-event', { type: 'perf', stage: info.stage }));
   session.on('client-message', (args) => {
     if (args[0] === 'zephyr-fs') safeSend('hotkey', 'fullscreen');
+    else if (args[0] === 'zephyr-prev') safeSend('hotkey', 'prev');
+    else if (args[0] === 'zephyr-next') safeSend('hotkey', 'next');
+    else if (args[0] === 'zephyr-queue') safeSend('hotkey', 'queue');
   });
   session.on('closed', () => { hideEmbed(); safeSend('mpv-event', { type: 'closed' }); });
   session.on('stopped', () => hideEmbed());
@@ -787,7 +882,10 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    mainWindow.show();
+    const finish = () => { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); } closeSplash(); };
+    const wait = splashWin ? Math.max(0, 1300 - (Date.now() - splashShownAt)) : 0;
+    setSplashStatus('mpv ' + (findMpv() ? '✓' : '✗') + '   yt-dlp ' + (findYtDlp() ? '✓' : '✗') + '   ffmpeg ' + (findFfmpeg() ? '✓' : '✗'));
+    setTimeout(finish, wait);
     setupThumbar();
     log('App ready. mpv:', findMpv() || 'NOT FOUND', '| yt-dlp:', findYtDlp() || 'NOT FOUND', '| js runtime:', (findJsRuntime() || {}).kind);
   });
@@ -873,6 +971,11 @@ function createMenu() {
     {
       label: 'Help',
       submenu: [
+        { label: 'User guide', accelerator: 'F1', click: () => safeSend('hotkey', 'guide') },
+        { label: 'Keyboard shortcuts', accelerator: 'Shift+/', click: () => safeSend('hotkey', 'shortcuts') },
+        { label: 'Tools & health…', click: () => safeSend('hotkey', 'tools') },
+        { label: 'Copy diagnostics (for bug reports)', click: () => safeSend('hotkey', 'diagnostics') },
+        { type: 'separator' },
         {
           label: 'About ZephyrPlayer',
           click: () => {
@@ -1292,8 +1395,8 @@ handle('mpv:getState', async () => {
 
 handle('media:probe', async (_e, file) => getProbe().probe(file));
 
-handle('media:thumb', async (_e, file, duration) => {
-  const out = await getProbe().thumb(file, duration);
+handle('media:thumb', async (_e, file, duration, cover) => {
+  const out = await getProbe().thumb(file, duration, !!cover);
   return { ok: !!out, path: out };
 });
 
@@ -1353,6 +1456,144 @@ handle('ytdlp:playlist', async (_e, url, cookies) => {
         } catch (e) { resolve({ ok: false, error: 'Could not read playlist: ' + e.message }); }
       });
   });
+});
+
+/* ---- online posters/info (the renderer only calls this when the user has opted in) ---- */
+
+handle('online:lookup', async (_e, q) => {
+  if (!q || q.allow !== true) return { ok: false, error: 'Online lookup is off' };
+  const clean = {
+    kind: ['tv', 'movie', 'music', 'video'].includes(q.kind) ? q.kind : 'movie',
+    title: String(q.title || '').slice(0, 160), artist: String(q.artist || '').slice(0, 120),
+    year: Number(q.year) || null, season: Number(q.season) || null, episode: Number(q.episode) || null,
+    url: /^https?:\/\//i.test(String(q.url || '')) ? String(q.url).slice(0, 400) : ''
+  };
+  const svc = getOnline();
+  const r = await svc.lookup(clean);
+  if (!r || !r.ok) return r || { ok: false };
+  const out = Object.assign({}, r);
+  const file = await svc.poster(r.posters || []);
+  if (file) { out.posterPath = file; out.accent = posterAccent(file); }
+  if (r.stills && r.stills.length) { const f2 = await svc.poster(r.stills); if (f2) out.stillPath = f2; }
+  delete out.posters; delete out.stills;
+  return out;
+});
+
+handle('online:clearCache', async () => {
+  let removed = 0;
+  try {
+    const dir = path.join(app.getPath('userData'), 'posters');
+    for (const f of fs.readdirSync(dir)) { try { fs.unlinkSync(path.join(dir, f)); removed++; } catch {} }
+  } catch {}
+  try { fs.unlinkSync(path.join(app.getPath('userData'), 'online-cache.json')); } catch {}
+  onlineSvc = null;
+  return { ok: true, removed };
+});
+
+/* ---- clips from the A-B loop ---- */
+
+handle('media:exportClip', async (_e, o) => {
+  o = o || {};
+  const input = typeof o.path === 'string' ? o.path : '';
+  const mode = ['copy', 'precise', 'gif'].includes(o.mode) ? o.mode : 'precise';
+  const start = Number(o.start), end = Number(o.end);
+  const hasVideo = o.hasVideo !== false;
+  if (!input || !fileExists(input)) return { ok: false, error: 'Clips need a local file (not a stream)' };
+  const suggested = path.join(path.dirname(input), mediaTools.clipName(input, start, end, mode, hasVideo));
+  const ext = path.extname(suggested).slice(1);
+  const res = await showSave({ title: 'Save clip', defaultPath: suggested, filters: [{ name: 'Clip', extensions: [ext] }] });
+  if (res.canceled || !res.filePath) return { ok: false, cancelled: true };
+  const r = await mediaTools.exportClip(findFfmpeg(), { input, start, end, mode, out: res.filePath, hasVideo, ffprobePath: findFfprobe() });
+  return r;
+});
+
+handle('shell:showItem', async (_e, file) => {
+  if (typeof file === 'string' && fileExists(file)) { shell.showItemInFolder(file); return { ok: true }; }
+  return { ok: false };
+});
+
+/* ---- tools & health ---- */
+
+async function collectTools() {
+  const jsrt = findJsRuntime();
+  const defs = [
+    { name: 'mpv', path: findMpv(), args: ['--version'], role: 'Plays mkv / HEVC / everything', required: true },
+    { name: 'yt-dlp', path: findYtDlp(), args: ['--version'], role: 'YouTube and other sites', required: true },
+    { name: 'deno', path: jsrt && jsrt.kind.startsWith('deno') ? (jsrt.value ? jsrt.value.replace(/^deno:/, '') : 'deno') : null, args: ['--version'], role: 'JavaScript runtime for YouTube', required: true },
+    { name: 'ffmpeg', path: findFfmpeg(), args: ['-version'], role: 'Posters, clips, convert, record', required: false },
+    { name: 'ffprobe', path: findFfprobe(), args: ['-version'], role: 'Fast file info', required: false },
+    { name: 'whisper', path: findWhisper(), args: ['--help'], role: 'Local AI subtitles', required: false }
+  ];
+  const out = [];
+  for (const d of defs) {
+    const version = d.path && d.name !== 'whisper' ? await mediaTools.getVersion(d.path, d.args) : null;
+    out.push({ name: d.name, path: d.path || null, version: version || (d.path ? 'found' : null), role: d.role, required: d.required });
+  }
+  return { tools: out, jsRuntime: jsrt ? jsrt.kind : null };
+}
+
+handle('tools:status', async () => {
+  toolCache.clear();
+  const r = await collectTools();
+  return Object.assign({ ok: true, canInstall: process.platform === 'win32' && fileExists(path.join(__dirname, 'setup-tools.ps1')) }, r);
+});
+
+let installProc = null;
+handle('tools:install', async (_e, opts) => {
+  if (process.platform !== 'win32') return { ok: false, error: 'The installer script is for Windows. See TOOLS.md.' };
+  if (installProc) return { ok: false, error: 'An install is already running' };
+  const script = path.join(__dirname, 'setup-tools.ps1');
+  if (!fileExists(script)) return { ok: false, error: 'setup-tools.ps1 was not found next to the app' };
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-NoGitignore'];
+  if (opts && opts.whisper) args.push('-Whisper');
+  if (opts && opts.force) args.push('-Force');
+  return new Promise((resolve) => {
+    let tail = '';
+    try { installProc = spawn('powershell.exe', args, { windowsHide: true, cwd: __dirname }); }
+    catch (e) { installProc = null; resolve({ ok: false, error: e.message }); return; }
+    const feed = (d) => {
+      const text = d.toString();
+      tail = (tail + text).slice(-4000);
+      text.split(/\r?\n/).filter((l) => l.trim()).forEach((l) => safeSend('tools-progress', { line: l.slice(0, 300) }));
+    };
+    installProc.stdout.on('data', feed);
+    installProc.stderr.on('data', feed);
+    installProc.once('error', (e) => { installProc = null; resolve({ ok: false, error: e.message }); });
+    installProc.once('close', (code) => { installProc = null; toolCache.clear(); resolve({ ok: code === 0, code, tail: tail.slice(-600) }); });
+  });
+});
+
+handle('diag:collect', async () => {
+  const { tools, jsRuntime } = await collectTools();
+  let gpu = '';
+  try {
+    const info = await app.getGPUInfo('basic');
+    const d = info && info.gpuDevice && info.gpuDevice[0];
+    if (d) gpu = `${d.vendorString || ''} ${d.deviceString || ''} (driver ${d.driverVersion || '?'})`.trim();
+  } catch {}
+  let logText = '';
+  try { logText = fs.readFileSync(logFile, 'utf8').split(/\r?\n/).slice(-80).join('\n'); } catch {}
+  const text = mediaTools.buildDiagnostics({
+    version: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node,
+    os: `${os.type()} ${os.release()} ${os.arch()}`, cpu: (os.cpus()[0] || {}).model || '?', ram: Math.round(os.totalmem() / 1073741824) + ' GB',
+    gpu, tools: tools.map((t) => ({ name: t.name, path: t.path, version: t.version })), jsRuntime, settings: getSettings(),
+    log: logText.replace(new RegExp(os.homedir().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '~')
+  });
+  try { clipboard.writeText(text); } catch {}
+  return { ok: true, text };
+});
+
+handle('app:getSetting', async (_e, key) => ({ ok: true, value: getSettings()[key] }));
+handle('app:setSetting', async (_e, key, value) => ({ ok: setSetting(String(key), value) }));
+
+handle('docs:open', async (_e, which) => {
+  const names = { guide: 'README.md', tools: 'TOOLS.md', changes: 'CHANGES.md' };
+  const f = names[which];
+  const candidates = f ? [path.join(__dirname, f), path.join(__dirname, 'docs', f), path.join(getAppPath(), f)] : [];
+  const found = candidates.find((c) => fileExists(c));
+  if (!found) return { ok: false, error: 'Documentation file not found' };
+  const err = await shell.openPath(found);
+  return { ok: !err, error: err || null };
 });
 
 handle('shell:openExternal', async (_e, url) => {
@@ -1914,6 +2155,7 @@ handle('app:getInfo', async () => ({
 app.whenReady().then(() => {
   log('ZephyrPlayer starting... isPackaged:', app.isPackaged);
   pruneOldLogs();
+  showSplash();
 
   loadRecentFiles();
   updateJumpList();

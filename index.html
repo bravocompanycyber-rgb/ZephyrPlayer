@@ -115,9 +115,17 @@
               <button class="btn btn-primary" id="browseBtn">Open Files</button>
               <button class="btn btn-ghost" id="browseFolderBtn">Open Folder</button>
             </div>
+            <div class="continue-shelf" id="continueShelf" hidden></div>
           </div>
         </div>
 
+        <div class="audio-art" id="audioArt" hidden>
+          <div class="audio-art-img" id="audioArtImg"></div>
+          <div class="audio-art-title" id="audioArtTitle"></div>
+          <div class="audio-art-sub" id="audioArtSub"></div>
+        </div>
+        <div class="fs-line" id="fsLine"><i id="fsLineFill"></i></div>
+        <button class="fs-side-handle" id="fsSideHandle" title="Playlist (L)"><span class="zi" data-icon="playlist"></span></button>
         <div class="loader" id="loader" hidden><div class="spinner"></div></div>
         <button class="big-play" id="bigPlay" hidden><span class="zi" data-icon="play"></span></button>
         <div class="osd" id="osd" hidden></div>
@@ -188,7 +196,9 @@
     <button type="button" id="videoAdjBtn">Video adjustments</button>
     <button type="button" id="geomBtn">Aspect / rotate / crop</button>
     <button type="button" id="eqBtn">Equalizer</button>
+    <button type="button" id="detailsBtn">Details &amp; poster (D)</button>
     <button type="button" id="infoBtn">Media info</button>
+    <button type="button" id="clipBtn">Export A–B clip…</button>
     <button type="button" id="bookmarkBtn">Bookmarks</button>
     <button type="button" id="chapterBtn">Chapters</button>
     <div class="menu-divider"></div>
@@ -196,6 +206,9 @@
     <button type="button" id="networkBtn">Open network path…</button>
     <button type="button" id="assStyleBtn">Subtitle style (ASS)</button>
     <button type="button" id="audioAdvBtn">Advanced audio</button>
+    <button type="button" id="toolsBtn">Tools &amp; health</button>
+    <button type="button" id="shortcutsBtn">Keyboard shortcuts (?)</button>
+    <button type="button" id="guideBtn">User guide</button>
     <button type="button" id="aboutBtn">About / Help</button>
     <button type="button" id="assocBtn">File associations…</button>
   </div>
@@ -416,11 +429,21 @@
     <div class="settings-body">
       <label class="setting-row"><span>Theme / skin</span>
         <select id="settingTheme">
-          <option value="dark">Dark (default)</option>
-          <option value="light">Light</option>
+          <option value="zephyr">Zephyr (default dark)</option>
+          <option value="midnight">Midnight indigo</option>
           <option value="amoled">AMOLED black</option>
           <option value="ocean">Ocean</option>
           <option value="forest">Forest</option>
+          <option value="sunset">Sunset</option>
+          <option value="rose">Rosé</option>
+          <option value="nord">Nord</option>
+          <option value="dracula">Dracula</option>
+          <option value="mocha">Mocha</option>
+          <option value="mono">Monochrome</option>
+          <option value="contrast">High contrast</option>
+          <option value="light">Light</option>
+          <option value="paper">Paper (warm light)</option>
+          <option value="sky">Sky (blue light)</option>
         </select>
       </label>
       <label class="setting-row"><span>Performance</span>
@@ -459,6 +482,37 @@
       <label class="setting-row"><span>Remember position</span>
         <input type="checkbox" id="settingRemember" checked />
       </label>
+      <label class="setting-row"><span>Accent colour</span>
+        <select id="settingAccentMode">
+          <option value="theme">From the theme</option>
+          <option value="poster">Follow the poster / cover</option>
+          <option value="custom">Custom colour</option>
+        </select>
+      </label>
+      <label class="setting-row" id="accentColorRow" hidden><span>Pick colour</span>
+        <input type="color" id="settingAccentColor" value="#38bdf8" />
+      </label>
+      <label class="setting-row"><span>Fullscreen: thin progress line</span>
+        <input type="checkbox" id="settingFsLine" checked />
+      </label>
+      <label class="setting-row"><span>Show splash screen at start</span>
+        <input type="checkbox" id="settingSplash" checked />
+      </label>
+      <div class="setting-group-title">Online posters &amp; info <span class="chip">optional</span></div>
+      <label class="setting-row"><span>Fetch posters, covers &amp; info</span>
+        <input type="checkbox" id="settingOnline" />
+      </label>
+      <p class="settings-note" id="onlineNote">Off by default. When on, only a cleaned title (like "Inception 2010", never a file path) is sent to free services: TVmaze, Apple iTunes, Wikipedia, Deezer, and YouTube thumbnails. No account or key is needed. Results are cached on this PC.</p>
+      <label class="setting-row"><span>Playlist artwork</span>
+        <select id="settingArt">
+          <option value="frame">Video frame (default)</option>
+          <option value="poster">Online poster when found</option>
+        </select>
+      </label>
+      <div class="setting-btns">
+        <button class="btn btn-ghost" id="fetchAllInfoBtn">Fetch info for the whole playlist</button>
+        <button class="btn btn-ghost" id="clearOnlineCacheBtn">Clear poster cache</button>
+      </div>
       <button class="btn btn-ghost" id="clearHistoryBtn" style="margin-top:6px;">Clear watch history</button>
       <label class="setting-row"><span>Audio device (mpv)</span>
         <select id="settingAudioDevice">
@@ -656,9 +710,85 @@
     </div>
   </div>
 
+
+  <div class="settings-panel settings-panel-lg" id="detailsPanel" hidden>
+    <div class="settings-header"><h3>Details</h3><button class="icon-btn" id="closeDetails"><span class="zi" data-icon="close"></span></button></div>
+    <div class="settings-body details-body">
+      <div class="details-top">
+        <div class="details-poster" id="detailsPoster"></div>
+        <div class="details-meta">
+          <h2 id="detailsTitle">Nothing playing</h2>
+          <div class="details-line" id="detailsLine"></div>
+          <div class="details-chips" id="detailsChips"></div>
+          <p class="details-overview" id="detailsOverview"></p>
+          <div class="details-source" id="detailsSource"></div>
+        </div>
+      </div>
+      <div class="setting-btns">
+        <button class="btn btn-ghost" id="detailsRefresh">Look up again</button>
+        <button class="btn btn-ghost" id="detailsOpen" hidden>Open page</button>
+      </div>
+      <p class="settings-note" id="detailsHint"></p>
+    </div>
+  </div>
+
+  <div class="settings-panel settings-panel-lg" id="toolsPanel" hidden>
+    <div class="settings-header"><h3>Tools &amp; health</h3><button class="icon-btn" id="closeTools"><span class="zi" data-icon="close"></span></button></div>
+    <div class="settings-body">
+      <p class="settings-note">ZephyrPlayer uses these free tools. Missing ones only disable the feature in the second column.</p>
+      <table class="tools-table"><tbody id="toolsRows"></tbody></table>
+      <div class="setting-btns">
+        <button class="btn btn-primary" id="toolsInstall">Install / update missing tools</button>
+        <label class="inline-check"><input type="checkbox" id="toolsWhisper" /> include AI subtitles (whisper)</label>
+      </div>
+      <pre class="tools-log" id="toolsLog" hidden></pre>
+      <div class="setting-btns">
+        <button class="btn btn-ghost" id="toolsRefresh">Re-check</button>
+        <button class="btn btn-ghost" id="toolsDiag">Copy diagnostics</button>
+        <button class="btn btn-ghost" id="toolsDocs">Open TOOLS.md</button>
+      </div>
+      <p class="settings-note" id="toolsNote"></p>
+    </div>
+  </div>
+
+  <div class="settings-panel" id="clipPanel" hidden>
+    <div class="settings-header"><h3>Export A–B clip</h3><button class="icon-btn" id="closeClip"><span class="zi" data-icon="close"></span></button></div>
+    <div class="settings-body">
+      <div class="clip-range" id="clipRange">Set the A and B points first (A button or key A).</div>
+      <div class="clip-modes">
+        <button class="btn btn-primary" data-clip="precise"><b>MP4 clip</b><small>exact cut, plays everywhere</small></button>
+        <button class="btn btn-ghost" data-clip="copy"><b>Fast copy</b><small>lossless, no re-encode</small></button>
+        <button class="btn btn-ghost" data-clip="gif"><b>GIF</b><small>looping, 480 px wide</small></button>
+      </div>
+      <p class="settings-note" id="clipStatus"></p>
+      <button class="btn btn-ghost" id="clipShow" hidden>Show in folder</button>
+    </div>
+  </div>
+
+  <div class="settings-panel settings-panel-lg" id="shortcutsPanel" hidden>
+    <div class="settings-header"><h3>Keyboard shortcuts</h3><button class="icon-btn" id="closeShortcuts"><span class="zi" data-icon="close"></span></button></div>
+    <div class="settings-body shortcuts-body" id="shortcutsBody"></div>
+  </div>
+
+  <div class="settings-panel welcome" id="welcomePanel" hidden>
+    <div class="welcome-art"><span class="zi" data-icon="film"></span></div>
+    <h2>Welcome to ZephyrPlayer</h2>
+    <p class="settings-note">Pick a look, then you are ready. Everything can be changed later in Settings.</p>
+    <div class="swatches" id="welcomeSwatches"></div>
+    <label class="setting-row"><span>Fetch posters &amp; info online <small>(optional)</small></span><input type="checkbox" id="welcomeOnline" /></label>
+    <p class="settings-note">Sends only a cleaned title to free services (TVmaze, Apple iTunes, Wikipedia, Deezer). Never file paths. Off by default.</p>
+    <div class="setting-btns">
+      <button class="btn btn-primary" id="welcomeGo">Get started</button>
+      <button class="btn btn-ghost" id="welcomeTools">Check my tools</button>
+    </div>
+  </div>
+
+  <div class="health-banner" id="healthBanner" hidden><span id="healthText"></span><button class="btn btn-primary" id="healthFix">Fix it</button><button class="icon-btn" id="healthClose"><span class="zi" data-icon="close"></span></button></div>
   <script src="js/subtitle-parser.js"></script>
+  <script src="js/media-name.js"></script>
   <script src="js/icons-default.js"></script>
   <script src="js/icons.js"></script>
   <script src="js/player.js"></script>
+  <script src="js/features.js"></script>
 </body>
 </html>

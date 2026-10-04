@@ -138,7 +138,15 @@ function buildArgs(o) {
     if (o.cookies && /^(chrome|edge|firefox|brave|opera|vivaldi|chromium|safari)$/.test(o.cookies)) raw.push('cookies-from-browser=' + o.cookies);
     a.push('--ytdl-raw-options=' + raw.join(','));
   }
-  if (o.ytdlpPath) a.push('--script-opts=ytdl_hook-ytdl_path=' + String(o.ytdlpPath).replace(/\\/g, '/'));
+  {
+    // ONE --script-opts option (a second one would replace the first). Length-prefixed values survive commas in paths.
+    const lp2 = (v) => '%' + String(v).length + '%' + v;
+    const so = [];
+    if (o.ytdlpPath) so.push('ytdl_hook-ytdl_path=' + lp2(String(o.ytdlpPath).replace(/\\/g, '/')));
+    // mpv's on-screen controller (this is what you see in mpv fullscreen): bigger, seek bar always usable, auto-hides
+    so.push('osc-layout=bottombar', 'osc-seekbarstyle=knob', 'osc-hidetimeout=1800', 'osc-scalewindowed=1.15', 'osc-scalefullscreen=1.6', 'osc-minmousemove=3');
+    a.push('--script-opts=' + so.join(','));
+  }
 
   if (o.perf === 'low') a.push('--profile=fast', '--scale=bilinear', '--vd-lavc-threads=2', '--hwdec=no');
 
@@ -283,6 +291,10 @@ class MpvSession extends EventEmitter {
     }
 
     for (const p of OBSERVED) ipc.observe(p).catch(() => {});
+    // keys that talk to the app's own playlist (mpv only knows about the one file it was given)
+    ipc.command('keybind', '<', 'script-message zephyr-prev').catch(() => {});
+    ipc.command('keybind', '>', 'script-message zephyr-next').catch(() => {});
+    ipc.command('keybind', 'F8', 'script-message zephyr-queue').catch(() => {});
     if (this.opts.mode === 'child' || this.opts.mode === 'wid') {
       ipc.command('keybind', 'MBTN_LEFT', 'cycle pause').catch(() => {});
       ipc.command('keybind', 'MBTN_LEFT_DBL', 'script-message zephyr-fs').catch(() => {});

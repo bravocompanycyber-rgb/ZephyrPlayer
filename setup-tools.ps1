@@ -164,7 +164,7 @@ try {
 
   # ------------------------------------------------------------------ ffmpeg + ffprobe
   if (-not $SkipFfmpeg) {
-    Step 'ffmpeg + ffprobe (file info, poster frames, convert, record)'
+    Step 'ffmpeg + ffprobe (file info, poster frames, convert, record, clips)'
     Run-Tool 'ffmpeg' {
       $ff = Join-Path $Root 'ffmpeg\ffmpeg.exe'
       $fp = Join-Path $Root 'ffmpeg\ffprobe.exe'

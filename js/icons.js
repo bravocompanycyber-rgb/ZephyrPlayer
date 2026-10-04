@@ -35,7 +35,8 @@
   const MENU_ICONS = {
     frameBackBtn: 'frame-back', frameFwdBtn: 'frame-forward', videoAdjBtn: 'video-adjust', geomBtn: 'aspect', eqBtn: 'equalizer',
     infoBtn: 'info', bookmarkBtn: 'bookmark', chapterBtn: 'chapters', sleepBtn: 'sleep', networkBtn: 'network',
-    assStyleBtn: 'subtitles', audioAdvBtn: 'headphones', aboutBtn: 'info', assocBtn: 'film'
+    assStyleBtn: 'subtitles', audioAdvBtn: 'headphones', aboutBtn: 'info', assocBtn: 'film',
+    detailsBtn: 'image', clipBtn: 'scissors', toolsBtn: 'engine', shortcutsBtn: 'keyboard', guideBtn: 'info'
   };
   const TAB_ICONS = { queue: 'playlist', library: 'library', recent: 'recent' };
 

@@ -215,12 +215,12 @@
   let tActive = 0; const tQueue = [];
   function queueThumb(item) {
     const a = api();
-    if (item.thumb || item._thumbing || !item.path || !a || !a.thumbMedia || !(item.info && item.info.hasVideo)) return;
+    if (item.thumb || item._thumbing || !item.path || !a || !a.thumbMedia || !(item.info && (item.info.hasVideo || item.info.hasCover))) return;
     item._thumbing = true;
     const run = async () => {
       tActive++;
       try {
-        const r = await a.thumbMedia(item.path, itemDuration(item));
+        const r = await a.thumbMedia(item.path, itemDuration(item), !item.info.hasVideo);
         if (r && r.ok && r.path) { item.thumb = pathToFileUrl(r.path); updateRow(item); }
       } catch {}
       tActive--; item._thumbing = false;
@@ -345,7 +345,8 @@
     li.draggable = !plFilter;
     const idx = document.createElement('span'); idx.className = 'index'; idx.textContent = String(i + 1);
     const th = document.createElement('div'); th.className = 'thumb';
-    if (item.thumb) { const img = document.createElement('img'); img.src = item.thumb; img.alt = ''; img.loading = 'lazy'; th.appendChild(img); }
+    const artUrl = (window.ZApp && window.ZApp.artFor) ? window.ZApp.artFor(item) : item.thumb;
+    if (artUrl) { const img = document.createElement('img'); img.src = artUrl; img.alt = ''; img.loading = 'lazy'; th.appendChild(img); }
     else th.appendChild(window.ZIcons ? window.ZIcons.make(item.stream ? 'network' : (item.info && !item.info.hasVideo ? 'music' : 'film')) : document.createTextNode(''));
     const dur = itemDuration(item);
     if (dur > 0) { const b = document.createElement('span'); b.className = 'dur'; b.textContent = formatTime(dur); th.appendChild(b); }
@@ -385,7 +386,7 @@
       dragItem = null;
     });
 
-    if (!item.thumb && item.info && item.info.hasVideo) { if (thumbObserver) thumbObserver.observe(li); else queueThumb(item); }
+    if (!item.thumb && item.info && (item.info.hasVideo || item.info.hasCover)) { if (thumbObserver) thumbObserver.observe(li); else queueThumb(item); }
     return li;
   }
 
@@ -540,6 +541,7 @@
     currentTimeEl.textContent = '0:00';
     durationEl.textContent = '0:00';
     if (api() && api().reportProgress) api().reportProgress(-1);
+    if (window.ZApp) window.ZApp.emit('idle');
   }
 
   // ------------------------------------------------------- resume positions
@@ -549,6 +551,7 @@
     if (!item || !hasMedia()) return;
     const t = curTime(), d = curDur();
     if (!(d > 0)) return;
+    if (window.ZApp) window.ZApp.emit('position', item, t, d);
     if (t > 5 && t < d - 8) {
       updateRowProgress(item);
       lsSet(posKey(item), String(Math.floor(t)));
@@ -599,6 +602,7 @@
     bigPlay.hidden = true;
     renderPlaylist();
     savePlaylistSoon();
+    if (window.ZApp) window.ZApp.emit('itemstart', item);
     if (item.path && api() && api().recordOpened) api().recordOpened(item.path);
 
     const start = opts.startPos != null ? opts.startPos : getSavedPos(item);
@@ -768,6 +772,7 @@
 
   function handleEnded() {
     const item = playlist[currentIndex];
+    if (window.ZApp) window.ZApp.emit('itemend', item);
     if (item) { lsDel(posKey(item)); lsDel('zephyr-pos-' + item.fullName); }
     if (repeatMode === 2) {
       seekTo(0);
@@ -799,6 +804,7 @@
   function updatePlayIcon(playing) {
     iconPlay.hidden = playing;
     iconPause.hidden = !playing;
+    if (window.ZApp) window.ZApp.emit('playstate', !!playing);
   }
 
   let seekThrottle = 0;
@@ -824,6 +830,7 @@
       played.style.width = pct + '%';
       handle.style.left = pct + '%';
       currentTimeEl.textContent = formatTime(t);
+      if (window.ZApp) window.ZApp.emit('progress', pct, t, d);
     }
     const now = performance.now();
     if (d && now - lastReport > 1000) {
@@ -893,7 +900,8 @@
   function toggleFullscreen() {
     if (isMpv() && mpvMode === 'off') { mpvCmd('cycle', 'fullscreen'); return; } // mpv's own window
     if (!document.fullscreenElement) {
-      const p = videoWrapper.requestFullscreen ? videoWrapper.requestFullscreen() : null;
+      const root = document.documentElement;
+      const p = root.requestFullscreen ? root.requestFullscreen() : null;
       if (p && p.catch) p.catch(() => {});
     } else {
       const p = document.exitFullscreen ? document.exitFullscreen() : null;
@@ -909,15 +917,16 @@
   }
 
   // --------------------------------------------------------------------- speed
-  function setSpeed(rate) {
+  function setSpeed(rate, opts) {
     rate = clamp(Math.round(rate * 100) / 100, 0.25, 4);
+    if (window.ZApp && !(opts && opts.silentMem)) window.ZApp.emit('speed', rate);
     speedRate = rate;
     video.playbackRate = rate;
     if (isMpv()) mpvSet('speed', rate);
     speedLabel.textContent = rate + '×';
     speedMenu.querySelectorAll('button').forEach(b => b.classList.toggle('active', parseFloat(b.dataset.speed) === rate));
     speedMenu.hidden = true;
-    showOSD(rate + '×');
+    if (!(opts && opts.quiet)) showOSD(rate + '×');
   }
 
   // --------------------------------------------------------------------- A-B loop
@@ -1075,13 +1084,13 @@
 
   // Theme & Settings
   function toggleTheme() {
+    if (window.ZApp && window.ZApp.toggleLightDark) { window.ZApp.toggleLightDark(); return; }
     const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
     document.documentElement.setAttribute('data-theme', next);
-    localStorage.setItem('zephyr-theme', next);
   }
   function openSettings() {
     settingsPanel.hidden = false;
-    $('settingTheme').value = document.documentElement.getAttribute('data-theme') || 'dark';
+    if (window.ZApp && window.ZApp.syncSettingsUI) window.ZApp.syncSettingsUI();
     $('settingVolume').value = volumeSlider.value;
     $('settingSeek').value = seekStep;
     $('settingAutoNext').checked = autoNext;
@@ -1089,9 +1098,6 @@
   }
   function closeSettingsPanel() {
     if (settingsPanel) settingsPanel.hidden = true;
-    const theme = $('settingTheme').value;
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('zephyr-theme', theme);
     { const v = parseFloat($('settingVolume').value); if (Math.abs(v - volumeLevel) > 0.001) setVolume(v, { silent: true }); }
     seekStep = parseInt($('settingSeek').value, 10) || 10;
     autoNext = $('settingAutoNext').checked;
@@ -1227,6 +1233,7 @@
   });
   subMenu.querySelector('[data-action="off"]').addEventListener('click', () => {
     subCues = []; subtitleDisplay.textContent = ''; lastSubText = ''; subMenu.hidden = true;
+    if (window.ZApp) window.ZApp.emit('trackchosen', { type: 'sub', off: true });
     if (isMpv()) { selectedSid = 'no'; mpvSet('sid', 'no'); }
     showOSD('Subtitles off');
   });
@@ -1355,8 +1362,7 @@
   });
 
   // Init
-  const savedTheme = localStorage.getItem('zephyr-theme') || 'dark';
-  document.documentElement.setAttribute('data-theme', savedTheme);
+
   { const sv = parseFloat(lsGet('zephyr-volume')); setVolume(isFinite(sv) ? sv : 1, { silent: true }); }
   shuffle = lsGet('zephyr-shuffle') === '1';
   repeatMode = parseInt(lsGet('zephyr-repeat') || '0', 10) || 0;
@@ -1734,6 +1740,7 @@
         if (!subs.length) subTracksEl.appendChild(mkBtn('No subtitle tracks', false, null));
         subs.forEach((t, i) => subTracksEl.appendChild(mkBtn(trackLabel(t, i + 1), t.selected, async () => {
           selectedSid = t.id; subMenu.hidden = true;
+          if (window.ZApp) window.ZApp.emit('trackchosen', { type: 'sub', track: t });
           await mpvSet('sid', t.id);
           showOSD('Subtitle: ' + trackLabel(t, i + 1));
         })));
@@ -1743,6 +1750,7 @@
         if (!auds.length) audioTracksEl.appendChild(mkBtn('No audio tracks', false, null));
         auds.forEach((t, i) => audioTracksEl.appendChild(mkBtn(trackLabel(t, i + 1), t.selected, async () => {
           selectedAid = t.id; audioMenu.hidden = true;
+          if (window.ZApp) window.ZApp.emit('trackchosen', { type: 'audio', track: t });
           await mpvSet('aid', t.id);
           showOSD('Audio: ' + trackLabel(t, i + 1));
         })));
@@ -2615,6 +2623,7 @@
         case 'track-list':
           mp.tracks = Array.isArray(v) ? v : [];
           refreshHtml5Tracks();
+          if (window.ZApp) window.ZApp.emit('tracks', mp.tracks);
           break;
         case 'chapter-list':
           chapters = (Array.isArray(v) ? v : []).map((c, i) => ({ time: c.time, title: c.title || ('Chapter ' + (i + 1)) }));
@@ -3203,20 +3212,8 @@
 
   // Skins
   const settingTheme = document.getElementById('settingTheme');
-  function applySkin(name) {
-    document.body.classList.remove('skin-amoled', 'skin-ocean', 'skin-forest', 'theme-light');
-    if (name === 'light') document.body.classList.add('theme-light');
-    else if (name === 'amoled') document.body.classList.add('skin-amoled');
-    else if (name === 'ocean') document.body.classList.add('skin-ocean');
-    else if (name === 'forest') document.body.classList.add('skin-forest');
-    localStorage.setItem('zephyr-skin', name || 'dark');
-  }
-  if (settingTheme) {
-    const saved = localStorage.getItem('zephyr-skin') || 'dark';
-    settingTheme.value = saved;
-    applySkin(saved);
-    settingTheme.addEventListener('change', () => applySkin(settingTheme.value));
-  }
+  function applySkin(name) { if (window.ZApp && window.ZApp.setTheme) window.ZApp.setTheme(name || 'zephyr'); }
+  if (settingTheme) settingTheme.addEventListener('change', () => applySkin(settingTheme.value));
 
   // Performance prefs stored for next mpv launch
   ['settingPerf','settingVo','settingHwdec'].forEach(id => {
@@ -3586,40 +3583,33 @@ if (pasteUrlBtn && urlInput) {
   });
 }
 
-  // ===== Fullscreen mouse + controls auto-hide =====
-  let fsHideTimer = null;
 
-  function isFullscreen() {
-    return !!(document.fullscreenElement || document.webkitFullscreenElement);
-  }
-
-  function hideFsUi() {
-    if (!isFullscreen()) return;
-    document.body.classList.add('fs-hide-ui');
-  }
-
-  function showFsUi() {
-    document.body.classList.remove('fs-hide-ui');
-    clearTimeout(fsHideTimer);
-    if (isFullscreen()) {
-      fsHideTimer = setTimeout(hideFsUi, 2200);
-    }
-  }
-
-  if (videoWrapper) {
-    videoWrapper.addEventListener('mousemove', showFsUi);
-    videoWrapper.addEventListener('mousedown', showFsUi);
-    videoWrapper.addEventListener('click', showFsUi);
-  }
-
-  document.addEventListener('fullscreenchange', () => {
-    if (isFullscreen()) {
-      showFsUi();
-    } else {
-      clearTimeout(fsHideTimer);
-      document.body.classList.remove('fs-hide-ui');
-    }
-  });
+  // ===== bridge for features.js (themes, fullscreen UI, online info, tools, clips, memory...) =====
+  (function () {
+    const bus = {};
+    window.ZApp = {
+      api, esc, clamp, lsGet, lsSet, lsDel, formatTime, formatSize, posKey, pathToFileUrl,
+      get playlist() { return playlist; },
+      get currentIndex() { return currentIndex; },
+      get item() { return playlist[currentIndex] || null; },
+      get engine() { return engine; },
+      get mpvMode() { return mpvMode; },
+      get mpvReady() { return mpvReady; },
+      get ab() { return abLoop; },
+      get duration() { return curDur(); },
+      get time() { return curTime(); },
+      get seeking() { return isSeeking; },
+      isMpv, showOSD, playIndex, seekTo, seekRelative, step, togglePlay, stopAll, setSpeed, setVolume, toggleFullscreen,
+      addNativePaths, playStream, renderPlaylist, updateRow, savePlaylistSoon, probeItem, mpvCmd, mpvSet, itemDuration,
+      itemsFor() { return playlist.slice(); },
+      setMpvReady(v) {
+        mpvReady = !!v;
+        if (mpvStatus) { mpvStatus.textContent = mpvReady ? 'mpv ready' : 'mpv missing'; mpvStatus.style.color = mpvReady ? 'var(--accent)' : 'var(--text-muted)'; }
+      },
+      on(name, fn) { (bus[name] || (bus[name] = [])).push(fn); },
+      emit(name, ...args) { (bus[name] || []).forEach((fn) => { try { fn(...args); } catch (e) { console.error('ZApp.' + name, e); } }); }
+    };
+  })();
 
 })();
 

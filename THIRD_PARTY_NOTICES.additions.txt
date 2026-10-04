@@ -1,0 +1,10 @@
+Add these entries to your THIRD_PARTY_NOTICES.txt:
+
+mpv            https://mpv.io                       GPL-2.0-or-later / LGPL-2.1-or-later (build dependent)
+FFmpeg         https://ffmpeg.org                   LGPL-2.1 / GPL-2.0+ (build dependent)
+yt-dlp         https://github.com/yt-dlp/yt-dlp     The Unlicense
+Deno           https://deno.com                     MIT
+whisper.cpp    https://github.com/ggml-org/whisper.cpp   MIT
+Lucide icons   https://lucide.dev                   ISC (assets/icons/LICENSE-lucide.txt)
+Electron       https://www.electronjs.org           MIT
+Data services used only when the user enables online info: TVmaze (CC BY-SA), Apple iTunes Search, Wikipedia (CC BY-SA), Deezer, YouTube thumbnails.

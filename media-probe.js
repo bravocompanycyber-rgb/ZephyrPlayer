@@ -180,20 +180,22 @@ class MediaProbe {
     });
   }
 
-  /** One JPEG poster frame (cached). Resolves to a file path or null. */
-  async thumb(file, duration) {
+  /** One JPEG poster frame (cached). With cover=true the embedded album art is extracted instead.
+   *  Resolves to a file path or null. */
+  async thumb(file, duration, cover) {
     if (!this.ffmpegPath || !this.thumbDir || typeof file !== 'string') return null;
     let st;
     try { st = await fs.promises.stat(file); } catch { return null; }
-    const id = crypto.createHash('sha1').update(file + '|' + st.size + '|' + Math.round(st.mtimeMs)).digest('hex').slice(0, 20);
+    const id = crypto.createHash('sha1').update(file + '|' + st.size + '|' + Math.round(st.mtimeMs) + (cover ? '|c' : '')).digest('hex').slice(0, 20);
     const out = path.join(this.thumbDir, id + '.jpg');
     try { if ((await fs.promises.stat(out)).size > 200) return out; } catch {}
     try { await fs.promises.mkdir(this.thumbDir, { recursive: true }); } catch {}
     const at = Math.max(1, Math.min(Math.floor((Number(duration) || 20) * 0.12), 90));
+    const args = cover
+      ? ['-v', 'error', '-y', '-nostdin', '-i', file, '-an', '-map', '0:v:0', '-frames:v', '1', '-vf', 'scale=480:-2:flags=bilinear', '-q:v', '4', out]
+      : ['-v', 'error', '-y', '-nostdin', '-ss', String(at), '-i', file, '-frames:v', '1', '-vf', 'scale=320:-2:flags=bilinear', '-q:v', '5', out];
     return this._run(async () => new Promise((resolve) => {
-      execFile(this.ffmpegPath, ['-v', 'error', '-y', '-nostdin', '-ss', String(at), '-i', file, '-frames:v', '1',
-        '-vf', 'scale=320:-2:flags=bilinear', '-q:v', '5', out],
-      { timeout: 25000, windowsHide: true }, () => {
+      execFile(this.ffmpegPath, args, { timeout: 25000, windowsHide: true }, () => {
         fs.promises.stat(out).then((s) => resolve(s.size > 200 ? out : null)).catch(() => resolve(null));
       });
     }));

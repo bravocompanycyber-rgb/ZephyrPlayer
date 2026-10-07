@@ -31,6 +31,10 @@ const mediaUtils = require('./media-utils');
 const { MediaProbe } = require('./media-probe');
 const { OnlineMeta, accentFromBitmap } = require('./online-meta');
 const mediaTools = require('./media-tools');
+const externalPlayers = require('./external-players');
+const fileAssoc = require('./file-assoc');
+const { detectEdition } = require('./edition');
+const { cleanCfg, parseUserMpvOptions, composeAudioFilter } = require('./engine-config');
 const os = require('os');
 
 /* -------------------------------------------------------------------------- */
@@ -373,12 +377,28 @@ function getProbe() {
 
 // YouTube extraction now needs a JavaScript runtime for yt-dlp (https://github.com/yt-dlp/yt-dlp/wiki/EJS).
 // Prefer deno.exe next to the app (free), otherwise reuse this app's own Electron binary as a Node runtime.
+let editionCache = null;
+function getEdition() {
+  if (!editionCache) editionCache = detectEdition({ platform: process.platform, osRelease: os.release(), electron: process.versions.electron, node: process.versions.node });
+  return editionCache;
+}
+
 function findJsRuntime() {
   return cachedTool('jsruntime', () => {
+    const ed = getEdition();
     const deno = firstExisting(['deno.exe', 'deno'], toolDirs());
-    if (deno) return { kind: 'deno', value: 'deno:' + deno.replace(/\\/g, '/'), env: null };
-    if (onPath('deno')) return { kind: 'deno (PATH)', value: null, env: null };   // deno is yt-dlp's default
-    return { kind: 'electron-node', value: 'node:' + process.execPath.replace(/\\/g, '/'), env: { ELECTRON_RUN_AS_NODE: '1' } };
+    const qjs = firstExisting(['qjs.exe', 'quickjs.exe', 'qjs'], toolDirs());
+    const pick = (kind, file) => ({ kind, value: kind + ':' + file.replace(/\\/g, '/'), env: null });
+    if (ed.preferQuickJs) {                                    // Windows 7 / 8 / 8.1 and the legacy build
+      if (qjs) return pick('quickjs', qjs);
+      if (deno) return pick('deno', deno);
+    } else {
+      if (deno) return pick('deno', deno);
+      if (qjs) return pick('quickjs', qjs);
+      if (onPath('deno')) return { kind: 'deno (PATH)', value: null, env: null };   // deno is yt-dlp's default
+    }
+    if (ed.canUseElectronAsNode) return { kind: 'electron-node', value: 'node:' + process.execPath.replace(/\\/g, '/'), env: { ELECTRON_RUN_AS_NODE: '1' } };
+    return { kind: 'none', value: null, env: null };
   });
 }
 
@@ -655,6 +675,7 @@ function getSession() {
     else if (args[0] === 'zephyr-prev') safeSend('hotkey', 'prev');
     else if (args[0] === 'zephyr-next') safeSend('hotkey', 'next');
     else if (args[0] === 'zephyr-queue') safeSend('hotkey', 'queue');
+    else if (args[0] === 'zephyr-bookmark') safeSend('hotkey', 'bookmark');
   });
   session.on('closed', () => { hideEmbed(); safeSend('mpv-event', { type: 'closed' }); });
   session.on('stopped', () => hideEmbed());
@@ -675,6 +696,14 @@ function normalizeInputs(inputs) {
   if (Array.isArray(inputs)) return inputs.filter((x) => typeof x === 'string' && x).slice(0, 200);
   if (typeof inputs === 'string' && inputs) return [inputs];
   return [];
+}
+
+const audioState = { eq: {}, limiter: true, normalize: false, night: false };
+async function applyAudio() {
+  const s = session || getSession();
+  if (!s) return;
+  const af = composeAudioFilter(audioState);
+  if (af || s.live.has('af')) await s.setProp('af', af).catch((e) => log('af failed:', e.message));
 }
 
 async function startPlayback(opts = {}) {
@@ -718,8 +747,14 @@ async function startPlayback(opts = {}) {
     ytdlpPath: findYtDlp(), shaderDir: path.join(getAppPath(), 'shaders'),
     screenshotDir: ensureScreenshotDir(),
     reuse: opts.reuse !== false, restart: !!opts.restart,
-    cookies: COOKIE_BROWSERS.has(opts.cookies) ? opts.cookies : null
+    cookies: COOKIE_BROWSERS.has(opts.cookies) ? opts.cookies : null,
+    cfg: cleanCfg(opts.cfg)
   };
+  {
+    const ex = parseUserMpvOptions(opts.cfg && opts.cfg.extra);
+    base.userExtra = ex.accepted;
+    if (ex.rejected.length) log('ignored mpv options:', ex.rejected.join(' | '));
+  }
   if (inputs.some(mediaUtils.isUrl)) {
     const rt = findJsRuntime();
     base.jsRuntime = rt && rt.value;
@@ -735,6 +770,8 @@ async function startPlayback(opts = {}) {
   if (!res.ok) return { ok: false, error: res.error || 'mpv failed to start' };
 
   lastPlay = { inputs, quality: base.quality };
+  if (opts.cfg && opts.cfg.audio) { const a = opts.cfg.audio; audioState.limiter = a.limiter !== false; audioState.normalize = !!a.normalize; audioState.night = !!a.night; }
+  applyAudio();
   const embedded = mode === 'child' || mode === 'wid' || mode === 'sync';
   if (mode === 'child') scheduleEmbedLayout();
   const ytdlp = findYtDlp();
@@ -1191,7 +1228,7 @@ handle('mpv:playExternal', async (_e, opts) => {
   const o = opts && typeof opts === 'object' && !Array.isArray(opts) ? opts : { files: opts };
   return startPlayback({
     files: o.files, quality: o.quality, embed: o.embed, vo: o.vo, hwdec: o.hwdec,
-    perf: o.perf, startPos: o.startPos, volume: o.volume, mute: o.mute, cookies: o.cookies
+    perf: o.perf, startPos: o.startPos, volume: o.volume, mute: o.mute, cookies: o.cookies, cfg: o.cfg
   });
 });
 
@@ -1199,7 +1236,7 @@ handle('mpv:loadFile', async (_e, file, startPos) =>
   startPlayback({ files: [file], quality: (lastPlay && lastPlay.quality) || 'high', startPos }));
 
 handle('mpv:playUrl', async (_e, args) => {
-  const { url, quality, embed, startPos, volume, mute, vo, hwdec, perf, cookies } = args && typeof args === 'object' ? args : {};
+  const { url, quality, embed, startPos, volume, mute, vo, hwdec, perf, cookies, cfg } = args && typeof args === 'object' ? args : {};
   if (!url || !String(url).trim()) return { ok: false, error: 'empty url' };
   const u = String(url).trim();
   if (/youtube\.com|youtu\.be|vimeo\.com|twitch\.tv|dailymotion\.com/i.test(u) && !findYtDlp()) {
@@ -1208,7 +1245,7 @@ handle('mpv:playUrl', async (_e, args) => {
       error: 'yt-dlp required for YouTube. Place yt-dlp.exe next to ZephyrPlayer.\nhttps://github.com/yt-dlp/yt-dlp/releases'
     };
   }
-  return startPlayback({ files: [u], quality: quality || 'high', embed: embed !== false, startPos, volume, mute, vo, hwdec, perf, cookies });
+  return startPlayback({ files: [u], quality: quality || 'high', embed: embed !== false, startPos, volume, mute, vo, hwdec, perf, cookies, cfg });
 });
 
 handle('mpv:stop', async () => {
@@ -1224,7 +1261,7 @@ handle('mpv:setQuality', async (_e, quality) => {
     files: s.inputs, quality: quality || (s.opts && s.opts.quality) || 'high',
     vo: s.opts && s.opts.vo, hwdec: s.opts && s.opts.hwdec, perf: s.opts && s.opts.perf,
     startPos: s.lastTime, volume: Number(s.props.volume), mute: !!s.props.mute, embed: true, restart: true,
-    cookies: s.opts && s.opts.cookies
+    cookies: s.opts && s.opts.cookies, cfg: s.opts && s.opts.cfg && Object.assign({}, s.opts.cfg, { extra: '' })
   });
 });
 
@@ -1244,24 +1281,18 @@ handle('mpv:applyVideoAdj', async (_e, adj) => {
   return { ok: true, live: s.connected };
 });
 
-function buildAudioFilter(eq) {
-  const f = [];
-  if (eq && eq.normalize) f.push('loudnorm');
-  const bass = clampNum(eq && eq.bass, -15, 15), mid = clampNum(eq && eq.mid, -15, 15), treble = clampNum(eq && eq.treble, -15, 15);
-  if (bass || mid || treble) {
-    f.push(`equalizer=f=100:width_type=o:width=2:g=${bass}`);
-    f.push(`equalizer=f=1000:width_type=o:width=2:g=${mid}`);
-    f.push(`equalizer=f=8000:width_type=o:width=2:g=${treble}`);
-  }
-  const gain = clampNum(eq && eq.gain, 0, 20);
-  if (gain) f.push(`volume=${gain}dB`);
-  return f.length ? 'lavfi=[' + f.join(',') + ']' : '';
-}
-
 handle('mpv:applyEq', async (_e, eq) => {
   const s = needSession();
-  await s.setProp('af', buildAudioFilter(eq || {}));
+  audioState.eq = eq && typeof eq === 'object' ? eq : {};
+  await applyAudio();
   return { ok: true, live: s.connected };
+});
+
+handle('mpv:applyAudioPrefs', async (_e, p) => {
+  p = p && typeof p === 'object' ? p : {};
+  audioState.limiter = p.limiter !== false; audioState.normalize = !!p.normalize; audioState.night = !!p.night;
+  await applyAudio();
+  return { ok: true };
 });
 
 handle('mpv:frameStep', async (_e, dir) => {
@@ -1519,7 +1550,7 @@ async function collectTools() {
   const defs = [
     { name: 'mpv', path: findMpv(), args: ['--version'], role: 'Plays mkv / HEVC / everything', required: true },
     { name: 'yt-dlp', path: findYtDlp(), args: ['--version'], role: 'YouTube and other sites', required: true },
-    { name: 'deno', path: jsrt && jsrt.kind.startsWith('deno') ? (jsrt.value ? jsrt.value.replace(/^deno:/, '') : 'deno') : null, args: ['--version'], role: 'JavaScript runtime for YouTube', required: true },
+    { name: getEdition().preferQuickJs ? 'quickjs' : 'deno', path: jsrt && /^(deno|quickjs)/.test(jsrt.kind) ? (jsrt.value ? jsrt.value.replace(/^(deno|quickjs):/, '') : 'deno') : null, args: getEdition().preferQuickJs ? ['--help'] : ['--version'], role: 'JavaScript runtime for YouTube', required: true },
     { name: 'ffmpeg', path: findFfmpeg(), args: ['-version'], role: 'Posters, clips, convert, record', required: false },
     { name: 'ffprobe', path: findFfprobe(), args: ['-version'], role: 'Fast file info', required: false },
     { name: 'whisper', path: findWhisper(), args: ['--help'], role: 'Local AI subtitles', required: false }
@@ -1532,25 +1563,32 @@ async function collectTools() {
   return { tools: out, jsRuntime: jsrt ? jsrt.kind : null };
 }
 
+// In an installed app __dirname is inside the read-only app archive where PowerShell cannot run a script:
+// look next to the exe first (the installer puts it there), then in resources.
+function findSetupScript() {
+  const cands = [path.join(getAppPath(), 'setup-tools.ps1'), path.join(process.resourcesPath || getAppPath(), 'setup-tools.ps1'), path.join(__dirname, 'setup-tools.ps1')];
+  return cands.find((c) => fileExists(c) && !/\.asar[\\/]/.test(c)) || null;
+}
+
 handle('tools:status', async () => {
   toolCache.clear();
   const r = await collectTools();
-  return Object.assign({ ok: true, canInstall: process.platform === 'win32' && fileExists(path.join(__dirname, 'setup-tools.ps1')) }, r);
+  return Object.assign({ ok: true, edition: getEdition().label, canInstall: process.platform === 'win32' && !!findSetupScript() }, r);
 });
 
 let installProc = null;
 handle('tools:install', async (_e, opts) => {
   if (process.platform !== 'win32') return { ok: false, error: 'The installer script is for Windows. See TOOLS.md.' };
   if (installProc) return { ok: false, error: 'An install is already running' };
-  const script = path.join(__dirname, 'setup-tools.ps1');
-  if (!fileExists(script)) return { ok: false, error: 'setup-tools.ps1 was not found next to the app' };
+  const script = findSetupScript();
+  if (!script) return { ok: false, error: 'setup-tools.ps1 was not found next to the app' };
   const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-NoGitignore'];
   if (opts && opts.testOnly) args.push('-TestOnly');
   if (!(opts && opts.whisper)) args.push('-SkipWhisper');      // the script installs whisper by default
   if (opts && opts.force) args.push('-Force');
   return new Promise((resolve) => {
     let tail = '';
-    try { installProc = spawn('powershell.exe', args, { windowsHide: true, cwd: __dirname }); }
+    try { installProc = spawn('powershell.exe', args, { windowsHide: true, cwd: path.dirname(script) }); }
     catch (e) { installProc = null; resolve({ ok: false, error: e.message }); return; }
     const feed = (d) => {
       const text = d.toString();
@@ -1575,7 +1613,7 @@ handle('diag:collect', async () => {
   let logText = '';
   try { logText = fs.readFileSync(logFile, 'utf8').split(/\r?\n/).slice(-80).join('\n'); } catch {}
   const text = mediaTools.buildDiagnostics({
-    version: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node,
+    version: app.getVersion() + ' · ' + getEdition().label, electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node,
     os: `${os.type()} ${os.release()} ${os.arch()}`, cpu: (os.cpus()[0] || {}).model || '?', ram: Math.round(os.totalmem() / 1073741824) + ' GB',
     gpu, tools: tools.map((t) => ({ name: t.name, path: t.path, version: t.version })), jsRuntime, settings: getSettings(),
     log: logText.replace(new RegExp(os.homedir().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '~')
@@ -2085,52 +2123,46 @@ function getAssociationExecutable() {
 }
 
 handle('assoc:exportReg', async () => {
-  if (process.platform !== 'win32') {
-    return { ok: false, error: 'Windows only' };
-  }
-
-  const exe = getAssociationExecutable().replace(/\\/g, '\\\\');
-  const isPackaged = app.isPackaged;
-
-  const types = ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'webm', 'm4v', 'ts', 'mp3', 'flac', 'wav'];
-
-  let command;
-  if (isPackaged) {
-    command = `"${exe}" "%1"`;
-  } else {
-    const appDir = __dirname.replace(/\\/g, '\\\\');
-    command = `"${exe}" "${appDir}" "%1"`;
-  }
-
-  command = command.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-
+  if (process.platform !== 'win32') return { ok: false, error: 'Windows only' };
+  const exe = getAssociationExecutable();
+  const cmd = fileAssoc.openCommand({ exe, appDir: __dirname, packaged: app.isPackaged });
+  const esc = (v) => String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');          // escape ONCE for the .reg format
   let reg = 'Windows Registry Editor Version 5.00\r\n\r\n';
-  reg += '[HKEY_CURRENT_USER\\Software\\Classes\\ZephyrPlayer.File]\r\n';
-  reg += '@="ZephyrPlayer media"\r\n';
-  reg += '"FriendlyTypeName"="ZephyrPlayer media"\r\n\r\n';
-  reg += '[HKEY_CURRENT_USER\\Software\\Classes\\ZephyrPlayer.File\\shell\\open\\command]\r\n';
-  reg += '@="' + command + '"\r\n\r\n';
-
-  for (const ext of types) {
-    reg += '[HKEY_CURRENT_USER\\Software\\Classes\\.' + ext + '\\OpenWithProgids]\r\n';
-    reg += '"ZephyrPlayer.File"=""\r\n\r\n';
-  }
-
-  const result = await showSave({
-    title: 'Save file association registry',
-    defaultPath: 'ZephyrPlayer-associations.reg',
-    filters: [{ name: 'Registry', extensions: ['reg'] }]
-  });
-
-  if (result.canceled || !result.filePath) return { ok: false };
-
-  try {
-    fs.writeFileSync(result.filePath, reg, 'utf8');
-    return { ok: true, path: result.filePath };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
+  reg += '[HKEY_CURRENT_USER\\Software\\Classes\\' + fileAssoc.PROGID + ']\r\n@="ZephyrPlayer media file"\r\n\r\n';
+  reg += '[HKEY_CURRENT_USER\\Software\\Classes\\' + fileAssoc.PROGID + '\\shell\\open\\command]\r\n@="' + esc(cmd) + '"\r\n\r\n';
+  for (const ext of fileAssoc.selectedExts()) reg += '[HKEY_CURRENT_USER\\Software\\Classes\\.' + ext + '\\OpenWithProgids]\r\n"' + fileAssoc.PROGID + '"=hex(0):\r\n\r\n';
+  const res = await showSave({ title: 'Save registry file', defaultPath: 'zephyrplayer-associations.reg', filters: [{ name: 'Registry file', extensions: ['reg'] }] });
+  if (res.canceled || !res.filePath) return { ok: false, cancelled: true };
+  await fs.promises.writeFile(res.filePath, '\uFEFF' + reg, 'utf8');
+  return { ok: true, path: res.filePath };
 });
+
+function assocCtx(select) { return { exe: getAssociationExecutable(), appDir: __dirname, packaged: app.isPackaged, select }; }
+handle('assoc:status', async () => (process.platform === 'win32' ? fileAssoc.status() : { ok: false, error: 'Windows only' }));
+handle('assoc:register', async (_e, select) => (process.platform === 'win32' ? fileAssoc.register(assocCtx(select && typeof select === 'object' ? select : undefined)) : { ok: false, error: 'Windows only' }));
+handle('assoc:unregister', async () => (process.platform === 'win32' ? fileAssoc.unregister(assocCtx()) : { ok: false, error: 'Windows only' }));
+
+handle('external:list', async () => ({ ok: true, players: process.platform === 'win32' ? externalPlayers.detectPlayers() : [] }));
+handle('external:open', async (_e, o) => {
+  o = o || {};
+  const list = externalPlayers.detectPlayers();
+  const player = list.find((p) => p.id === o.id) || (o.id === 'auto' || !o.id ? list[0] : null);
+  if (!player) return { ok: false, error: 'No other player found' };
+  if (typeof o.file !== 'string' || (!mediaUtils.isUrl(o.file) && !fileExists(o.file))) return { ok: false, error: 'File not found' };
+  return externalPlayers.openIn(player, o.file);
+});
+
+handle('app:openFolder', async (_e, which) => {
+  const dirs = { data: app.getPath('userData'), logs: logDir, icons: ICON_DIRS().find((d) => fileExists(d)) || ICON_DIRS()[0] };
+  const d = dirs[which];
+  if (!d) return { ok: false };
+  try { fs.mkdirSync(d, { recursive: true }); } catch {}
+  const err = await shell.openPath(d);
+  return { ok: !err, error: err || null };
+});
+handle('app:toggleDevTools', async () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.toggleDevTools(); return { ok: true }; });
+handle('app:getEdition', async () => Object.assign({ ok: true, version: app.getVersion() }, getEdition()));
+handle('codec:report', async () => mediaTools.codecReport(findFfmpeg()));
 
 handle('shell:openDefaults', async () => {
   try {

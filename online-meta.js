@@ -12,6 +12,47 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+const https = require('https');
+const http = require('http');
+const { URL } = require('url');
+
+/** Minimal fetch() built on Node's https. Used when neither Electron's net.fetch nor a global fetch exists
+ *  (Electron 22 / Node 16 = the Windows 7 / 8 / 8.1 edition). Follows redirects, honours AbortSignal, never throws synchronously. */
+function nodeFetch(url, opts = {}, hops = 0) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try { u = new URL(url); } catch (e) { reject(e); return; }
+    const lib = u.protocol === 'http:' ? http : https;
+    const signal = opts.signal;
+    if (signal && signal.aborted) { reject(new Error('aborted')); return; }
+    const req = lib.request(u, { method: 'GET', headers: opts.headers || {}, timeout: 20000 }, (res) => {
+      const code = res.statusCode || 0;
+      if (code >= 300 && code < 400 && res.headers.location && hops < 5) {
+        res.resume();
+        nodeFetch(new URL(res.headers.location, u).toString(), opts, hops + 1).then(resolve, reject);
+        return;
+      }
+      const chunks = []; let size = 0;
+      res.on('data', (c) => { size += c.length; if (size > 12 * 1024 * 1024) { req.destroy(new Error('response too large')); return; } chunks.push(c); });
+      res.on('error', reject);
+      res.on('end', () => {
+        const buf = Buffer.concat(chunks);
+        resolve({
+          ok: code >= 200 && code < 300, status: code,
+          headers: { get: (k) => { const v = res.headers[String(k).toLowerCase()]; return Array.isArray(v) ? v[0] : (v || null); } },
+          arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+          json: async () => JSON.parse(buf.toString('utf8')),
+          text: async () => buf.toString('utf8')
+        });
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+    if (signal) signal.addEventListener('abort', () => req.destroy(new Error('aborted')), { once: true });
+    req.end();
+  });
+}
+
 const UA = 'ZephyrPlayer/3 (desktop media player; local metadata lookup)';
 const POS_TTL = 30 * 86400000;
 const NEG_TTL = 3 * 86400000;
@@ -65,7 +106,7 @@ function accentFromBitmap(buf, bgra) {
 
 class OnlineMeta {
   constructor({ fetchImpl, cacheFile, posterDir, log, spacingMs = 350 } = {}) {
-    this.fetch = fetchImpl || (typeof fetch === 'function' ? fetch : null);
+    this.fetch = fetchImpl || (typeof fetch === 'function' ? fetch : nodeFetch);
     this.cacheFile = cacheFile || null;
     this.posterDir = posterDir || null;
     this.log = typeof log === 'function' ? log : () => {};
@@ -266,4 +307,4 @@ class OnlineMeta {
   }
 }
 
-module.exports = { OnlineMeta, similarity, norm, youtubeId, accentFromBitmap, stripHtml };
+module.exports = { OnlineMeta, nodeFetch, similarity, norm, youtubeId, accentFromBitmap, stripHtml };

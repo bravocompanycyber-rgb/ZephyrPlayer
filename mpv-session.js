@@ -80,27 +80,36 @@ function qualityArgs(quality, shaderDir, log, light) {
   return a;
 }
 
+const clampN = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, Math.round(n))) : d; };
+const LANG_RE = /^[A-Za-z0-9,_-]{0,40}$/;
+
 function buildArgs(o) {
   const win = (o.platform || process.platform) === 'win32';
   const level = o.level || 0;
-  const vol = Math.max(0, Math.min(150, Math.round(Number(o.volume) || 100)));
+  const cfg = o.cfg || {};
+  const volMax = clampN(cfg.volumeMax, 100, 300, 200);
+  const vol = Math.max(0, Math.min(volMax, Math.round(Number(o.volume) || 100)));
+  const cacheMb = clampN(cfg.cacheMb, 50, 2000, 200);
   const a = [
     '--input-ipc-server=' + o.ipcPath,
     '--idle=no', '--keep-open=yes', '--force-window=yes',
     '--no-input-terminal', '--msg-level=all=error', '--term-status-msg=',
     '--osd-level=1',
     '--title=${?media-title:${media-title} - }ZephyrPlayer',
-    '--volume-max=150', '--volume=' + vol,
-    '--sub-auto=fuzzy', '--slang=en,eng', '--network-timeout=20'
+    '--volume-max=' + volMax, '--volume=' + vol,
+    '--network-timeout=20'
   ];
+  if (cfg.slang === '' ) a.push('--sub-auto=no');
+  else { a.push('--sub-auto=fuzzy'); a.push('--slang=' + (typeof cfg.slang === 'string' && LANG_RE.test(cfg.slang) ? cfg.slang : 'en,eng')); }
+  if (typeof cfg.alang === 'string' && cfg.alang && LANG_RE.test(cfg.alang)) a.push('--alang=' + cfg.alang);
   if (o.mute) a.push('--mute=yes');
   if (o.screenshotDir) a.push('--screenshot-format=png', '--screenshot-template=zephyr-%F-%04n', '--screenshot-directory=' + o.screenshotDir);
   if (o.startPos && o.startPos > 3) a.push('--start=' + Math.floor(o.startPos));
 
   // decode / cache profile
   if (level < 3) {
-    a.push('--cache=yes', '--demuxer-max-bytes=200MiB', '--demuxer-max-back-bytes=100MiB',
-      '--demuxer-readahead-secs=30', '--hr-seek=yes', '--video-sync=audio', '--interpolation=no',
+    a.push('--cache=yes', '--demuxer-max-bytes=' + cacheMb + 'MiB', '--demuxer-max-back-bytes=' + Math.max(25, Math.round(cacheMb / 2)) + 'MiB',
+      '--demuxer-readahead-secs=30', '--hr-seek=' + (cfg.hrSeek === false ? 'no' : 'yes'), '--video-sync=audio', '--interpolation=no',
       '--audio-pitch-correction=yes', '--stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=5');
   }
   // hwdec ladder: native GPU decode (fast, low CPU: HEVC/x265, 10-bit, 4K) -> copy-back (compatible) -> software
@@ -164,8 +173,50 @@ function buildArgs(o) {
     a.push('--autofit=75%x75%', '--autofit-larger=92%x92%', '--geometry=50%:50%');
   }
 
+  if (level < 2 && Array.isArray(o.userExtra)) a.push(...o.userExtra);     // a typo in the user's options falls back to safe mode instead of failing
   if (Array.isArray(o.extra)) a.push(...o.extra);
   return a;
+}
+
+/* ------------------------- mouse bindings inside the mpv window ------------------------- */
+
+function mouseBindings(m, steps, mode) {
+  m = m || {};
+  const vs = clampN(steps && steps.volume, 1, 20, 5), ss = clampN(steps && steps.seek, 1, 300, 10);
+  const embedded = mode === 'child' || mode === 'wid';
+  const wheel = (kind, up) => {
+    switch (kind) {
+      case 'volume': return up ? 'add volume ' + vs : 'add volume -' + vs;
+      case 'seek': return up ? 'seek ' + ss : 'seek -' + ss;
+      case 'speed': return up ? 'add speed 0.25' : 'add speed -0.25';
+      case 'track': return up ? 'script-message zephyr-prev' : 'script-message zephyr-next';
+      default: return 'ignore';
+    }
+  };
+  const click = (kind) => {
+    switch (kind) {
+      case 'playpause': return 'cycle pause';
+      case 'fullscreen': return embedded ? 'script-message zephyr-fs' : 'cycle fullscreen';
+      case 'mute': return 'cycle mute';
+      case 'screenshot': return 'screenshot';
+      case 'next': return 'script-message zephyr-next';
+      case 'prev': return 'script-message zephyr-prev';
+      case 'seekFwd': return 'seek ' + ss;
+      case 'seekBack': return 'seek -' + ss;
+      case 'abloop': return 'ab-loop';
+      case 'bookmark': return 'script-message zephyr-bookmark';
+      case 'playlist': return 'script-message zephyr-queue';
+      default: return 'ignore';
+    }
+  };
+  const out = [
+    ['WHEEL_UP', wheel(m.wheel, true)], ['WHEEL_DOWN', wheel(m.wheel, false)],
+    ['Shift+WHEEL_UP', wheel(m.wheelShift, true)], ['Shift+WHEEL_DOWN', wheel(m.wheelShift, false)],
+    ['Ctrl+WHEEL_UP', wheel(m.wheelCtrl, true)], ['Ctrl+WHEEL_DOWN', wheel(m.wheelCtrl, false)],
+    ['MBTN_LEFT', click(m.click)], ['MBTN_LEFT_DBL', click(m.dblclick)], ['MBTN_MID', click(m.middleClick)],
+    ['MBTN_BACK', click(m.mouseBack)], ['MBTN_FORWARD', click(m.mouseForward)]
+  ];
+  return out;
 }
 
 /* ---------------------------------- session ---------------------------------- */
@@ -221,7 +272,9 @@ class MpvSession extends EventEmitter {
     await this.stop();
     this.inputs = list;
     this.opts = Object.assign({}, opts);
-    this.level = 0;
+    this.level = clampN(opts.cfg && opts.cfg.compat, 0, 2, 0);
+    this.minLevel = this.level;
+    this._stallReloads = 0;
     this.recoveries = 0;
     this.perfStage = 0;
     this.tail = '';
@@ -277,6 +330,8 @@ class MpvSession extends EventEmitter {
     this.ipc = ipc;
     ipc.on('prop', (name, val) => {
       if (name === 'time-pos' && typeof val === 'number') this.lastTime = val;
+      if (name === 'paused-for-cache') this._onCacheStall(!!val);
+      if (name === 'duration' && typeof val === 'number' && val > 0 && this._loading) this._markLoaded();
       this.emit('prop', name, val);
     });
     ipc.on('mpv-event', (m) => this._onMpvEvent(m));
@@ -295,11 +350,20 @@ class MpvSession extends EventEmitter {
     ipc.command('keybind', '<', 'script-message zephyr-prev').catch(() => {});
     ipc.command('keybind', '>', 'script-message zephyr-next').catch(() => {});
     ipc.command('keybind', 'F8', 'script-message zephyr-queue').catch(() => {});
-    if (this.opts.mode === 'child' || this.opts.mode === 'wid') {
-      ipc.command('keybind', 'MBTN_LEFT', 'cycle pause').catch(() => {});
-      ipc.command('keybind', 'MBTN_LEFT_DBL', 'script-message zephyr-fs').catch(() => {});
-      ipc.command('script-message', 'osc-visibility', 'never', 'no-osd').catch(() => {});
+    {
+      const cfg = this.opts.cfg || {};
+      const binds = mouseBindings(cfg.mouse, cfg.steps, this.opts.mode);
+      if (this.opts.mode === 'child' || this.opts.mode === 'wid') {
+        // the embedded surface has no keyboard focus: a double-click must always reach the app's fullscreen
+        const dbl = binds.find((b) => b[0] === 'MBTN_LEFT_DBL'); if (dbl) dbl[1] = 'script-message zephyr-fs';
+        ipc.command('script-message', 'osc-visibility', 'never', 'no-osd').catch(() => {});
+      }
+      for (const [k, cmd] of binds) ipc.command('keybind', k, cmd).catch(() => {});
     }
+    this._loading = true;
+    this._startOpenWatch();
+    this._startHeartbeat();
+    ipc.get('duration').then((d) => { if (typeof d === 'number' && d > 0 && this._loading && this.ipc === ipc) this._markLoaded(); }).catch(() => {});
     this._applyLive();
     this._armGuards();
     clearTimeout(this._stableTimer);
@@ -313,8 +377,9 @@ class MpvSession extends EventEmitter {
   }
 
   _onMpvEvent(m) {
-    if (m.event === 'file-loaded') { this._applyLive(); this._armGuards(); this.emit('file-loaded'); }
-    else if (m.event === 'end-file') this.emit('end-file', { reason: m.reason, error: m.file_error || null });
+    if (m.event === 'file-loaded') { this._loading = true; this._markLoaded(); }
+    else if (m.event === 'end-file') { this._loading = false; this._clearOpenWatch(); this.emit('end-file', { reason: m.reason, error: m.file_error || null }); }
+    else if (m.event === 'start-file') { this._loading = true; this._startOpenWatch(); }
     else if (m.event === 'client-message') this.emit('client-message', m.args || []);
   }
 
@@ -325,6 +390,7 @@ class MpvSession extends EventEmitter {
     this.ipc = null;
     clearTimeout(this._stableTimer);
     this._clearGuards();
+    this._clearHang();
     if (this._expected.has(child)) { this.emit('stopped'); return; }
     if (code === 0 && !signal) { this.emit('closed', { code }); return; }
 
@@ -349,23 +415,110 @@ class MpvSession extends EventEmitter {
     const child = this.child;
     clearTimeout(this._stableTimer);
     this._clearGuards();
+    this._clearHang();
     if (!child) return;
     this._expected.add(child);
     const exited = new Promise((resolve) => child.once('exit', resolve));
-    try { if (this.ipc && this.ipc.connected) await this.ipc.command('quit').catch(() => {}); } catch {}
+    // ask politely but never wait on a frozen player: the kill timers below start immediately
+    try { if (this.ipc && this.ipc.connected) this.ipc.commandT(700, 'quit').catch(() => {}); } catch {}
     const killTimer = setTimeout(() => {
       try { child.kill(); } catch {}
       if (this.platform === 'win32' && child.pid) {
         try { spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => {}); } catch {}
       }
     }, 800);
-    await Promise.race([exited, new Promise((r) => setTimeout(r, 2500))]);
+    const hardTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 1800);   // a frozen process ignores a polite kill
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 3000))]);
     clearTimeout(killTimer);
+    clearTimeout(hardTimer);
     if (this.child === child) {
       this.child = null;
       try { if (this.ipc) this.ipc.destroy(); } catch {}
       this.ipc = null;
     }
+  }
+
+  /* ----- hang protection (a frozen mpv must never freeze the app) ----- */
+
+  _clearHang() {
+    clearInterval(this._hbTimer); this._hbTimer = null;
+    this._clearOpenWatch();
+    clearTimeout(this._stallTimer); this._stallTimer = null;
+    this._misses = 0;
+  }
+
+  _startHeartbeat() {
+    clearInterval(this._hbTimer);
+    this._misses = 0;
+    const every = (this.opts && this.opts.heartbeatMs) || 4000;
+    const wait = (this.opts && this.opts.heartbeatTimeoutMs) || 3000;
+    const need = (this.opts && this.opts.heartbeatMisses) || 3;
+    this._hbTimer = setInterval(async () => {
+      if (!this.connected || this._escalating || this._loading || this._hbBusy) return;   // opening a file may legitimately block for a while
+      this._hbBusy = true;
+      try { await this.ipc.commandT(wait, 'get_property', 'pause'); this._misses = 0; }
+      catch (e) {
+        if (!this.connected) { this._hbBusy = false; return; }
+        this._misses++;
+        if (this._misses >= need) { this._misses = 0; this._hbBusy = false; await this._restartHung('mpv stopped responding'); return; }
+      }
+      this._hbBusy = false;
+    }, every);
+  }
+
+  async _restartHung(reason) {
+    if (this._escalating || !this.opts) return false;
+    if (this.recoveries >= 4) { this.emit('failed', { error: reason + ' (too many times)' }); await this.stop(); return false; }
+    this._escalating = true;
+    try {
+      this.recoveries++;
+      const t = this.lastTime;
+      this.log('hang recovery:', reason);
+      this.emit('recovering', { level: this.level, attempt: this.recoveries, reason });
+      await this.stop();                                // stop() ends in SIGKILL / taskkill /F
+      if (!this.opts) return false;
+      const r = await this._launch(t);
+      if (r && r.ok === false && !r.pending) this.emit('failed', { error: r.error });
+      return true;
+    } finally { this._escalating = false; }
+  }
+
+  // Called from the 'file-loaded' event AND from mpv's own state (duration known), so a missed event can never leave us "loading" forever.
+  _markLoaded() {
+    if (!this._loading) return;
+    this._loading = false;
+    this._clearOpenWatch();
+    this._applyLive();
+    this._armGuards();
+    this.emit('file-loaded');
+  }
+
+  _startOpenWatch() {
+    this._clearOpenWatch();
+    const ms = (this.opts && this.opts.openTimeoutMs) || 75000;
+    this._openTimer = setTimeout(() => {
+      if (!this._loading) return;
+      this.log('open watchdog: file did not open in', ms, 'ms');
+      this._loading = false;
+      this.emit('end-file', { reason: 'error', error: 'Timed out while opening this file or link' });
+      this.stop().catch(() => {});
+    }, ms);
+  }
+  _clearOpenWatch() { clearTimeout(this._openTimer); this._openTimer = null; }
+
+  _onCacheStall(stalled) {
+    clearTimeout(this._stallTimer); this._stallTimer = null;
+    if (!stalled || !this.opts || this.opts.cfg && this.opts.cfg.streamReload === false) return;
+    const src = this.inputs[0] || '';
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(src) || /^file:/i.test(src)) return;           // only for network sources
+    const ms = (this.opts && this.opts.stallMs) || 30000;
+    this._stallTimer = setTimeout(async () => {
+      if (!this.connected || this._stallReloads >= 3) return;
+      this._stallReloads++;
+      this.log('stream stalled, reloading from', this.lastTime);
+      this.emit('recovering', { level: this.level, attempt: this._stallReloads, reason: 'stream stalled, reconnecting' });
+      try { await this._loadfile(src, this.lastTime); } catch (e) { this.log('stall reload failed:', e.message); }
+    }, ms);
   }
 
   /* ----- self-healing guards ----- */
@@ -481,9 +634,10 @@ class MpvSession extends EventEmitter {
     const child = this.child;
     clearTimeout(this._stableTimer);
     this._clearGuards();
+    this._clearHang();
     if (!child) return;
     this._expected.add(child);
-    try { child.kill(); } catch {}
+    try { child.kill('SIGKILL'); } catch { try { child.kill(); } catch {} }
     if (this.platform === 'win32' && child.pid) {
       try { spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => {}); } catch {}
     }
@@ -527,4 +681,4 @@ class MpvSession extends EventEmitter {
   }
 }
 
-module.exports = { MpvSession, buildArgs, qualityArgs, OBSERVED, SETTABLE, COMMANDS };
+module.exports = { MpvSession, buildArgs, qualityArgs, mouseBindings, OBSERVED, SETTABLE, COMMANDS };

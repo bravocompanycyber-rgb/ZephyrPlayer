@@ -8,6 +8,7 @@ These are too big or change too often for the repo. After cloning, fetch them wi
     setup-tools.bat -TestOnly                        (download nothing, just prove the tools work)
     setup-tools.bat -SkipWhisper                     (leave out the AI-subtitle tool; -SkipModel keeps the exe but not the 140 MB model)
     setup-tools.bat -DryRun                          (show what it would download, change nothing)
+    setup-tools.bat -Edition legacy                  (force the Windows 7 / 8 / 8.1 choices; normally picked automatically)
 
 It installs **everything including whisper** (AI subtitles), then runs a **self-test** that proves each tool really works,
 not just that the file exists.
@@ -19,13 +20,19 @@ It is safe to re-run: anything already present is skipped. If PowerShell blocks 
 |---|---|---|
 | `mpv.exe` (root) | mkv, HEVC/x265, AC3, everything the browser engine cannot play | github.com/shinchiro/mpv-winbuild-cmake/releases (`mpv-x86_64-...7z`, not the `v3` one) |
 | `yt-dlp.exe` (root) | YouTube and other sites | github.com/yt-dlp/yt-dlp/releases/latest |
-| `deno.exe` (root) | JavaScript runtime yt-dlp needs for YouTube | github.com/denoland/deno/releases (`deno-x86_64-pc-windows-msvc.zip`) |
+| `deno.exe` (root) | JavaScript runtime yt-dlp needs for YouTube (Windows 10+) | github.com/denoland/deno/releases (`deno-x86_64-pc-windows-msvc.zip`) |
+| `qjs.exe` (root) | the same job on Windows 7 / 8 / 8.1 (legacy edition) | github.com/quickjs-ng/quickjs/releases (`qjs-windows-x86_64.exe`) |
 | `ffmpeg\ffmpeg.exe`, `ffmpeg\ffprobe.exe` | file info, poster frames, clips, convert, record | gyan.dev/ffmpeg/builds ("release essentials") |
 | `whisper-cli.exe` + `whisper.dll`, `ggml*.dll` (root) | local AI subtitles (installed by default) | github.com/ggml-org/whisper.cpp/releases (`whisper-bin-x64.zip`) |
 | `models\ggml-base.bin` (about 140 MB) | the Whisper speech model (`-ModelName small` for a better, slower one) | huggingface.co/ggerganov/whisper.cpp |
 | `mpv.com`, `vulkan-1.dll`, `d3dcompiler_43.dll` (root) | mpv console launcher (used for version checks) and GPU support, copied from the mpv archive | included in the mpv download |
 
 Also required once per machine: Node.js LTS (nodejs.org), then `npm install` (the script's `-Npm` does this).
+
+## Windows 8.1 / legacy edition
+On Windows 7 / 8 / 8.1 the script switches to the **legacy** choices on its own: **QuickJS** (`qjs.exe`, from github.com/quickjs-ng/quickjs/releases) replaces Deno, which needs
+Windows 10; 32-bit downloads are used on 32-bit Windows; unzipping works with PowerShell 4. The self-test then checks QuickJS the same way it checks Deno.
+Third-party tools decide for themselves whether they run on 8.1: the self-test shows exactly which do. If a tool fails there, see `editions/README.md`.
 
 ## What the self-test proves
 | Test | What it really does |
@@ -34,7 +41,7 @@ Also required once per machine: Node.js LTS (nodejs.org), then `npm install` (th
 | ffprobe | reads that clip and reports the right duration and codecs |
 | mpv decode | plays both clips (H.264, and HEVC 10-bit + AC3 in mkv = the x265 case) |
 | mpv GPU | starts the Direct3D 11 renderer (a tiny window flashes for a second) |
-| deno | runs JavaScript |
+| deno / quickjs | runs JavaScript |
 | yt-dlp | resolves a real YouTube video using deno (needs internet) |
 | whisper | transcribes a spoken sentence made with the built-in Windows voice and shows what it heard |
 

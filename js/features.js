@@ -11,6 +11,7 @@
   const root = document.documentElement;
   const body = document.body;
   const ls = (k, v) => (v === undefined ? A.lsGet(k) : A.lsSet(k, v));
+  const S = window.ZSettings;
   const on = (el, ev, fn) => { if (el) el.addEventListener(ev, fn); };
   const open = (id) => { const p = $(id); if (p) p.hidden = false; };
   const close = (id) => { const p = $(id); if (p) p.hidden = true; };
@@ -42,9 +43,9 @@
   const lum = (h) => { const c = hexToRgb(h); if (!c) return 0; const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }; return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); };
 
   function applyAccent() {
-    const mode = ls('zephyr-accent-mode') || 'theme';
+    const mode = S.get('accentMode');
     let hex = null;
-    if (mode === 'custom') hex = ls('zephyr-accent');
+    if (mode === 'custom') hex = S.get('accentColor');
     else if (mode === 'poster') { const it = A.item; hex = it && it.accent; }
     const st = root.style;
     if (!hexToRgb(hex)) { ['--accent', '--accent-hover', '--accent-soft', '--on-accent'].forEach((v) => st.removeProperty(v)); return; }
@@ -64,9 +65,8 @@
     const t = THEME_MAP[name];
     root.setAttribute('data-skin', name);
     root.setAttribute('data-theme', t.light ? 'light' : 'dark');
-    ls('zephyr-skin', name);
     ls(t.light ? 'zephyr-skin-light' : 'zephyr-skin-dark', name);
-    const sel = $('settingTheme'); if (sel) sel.value = name;
+    if (S) S.set('theme', name, { quiet: true });
     document.querySelectorAll('#welcomeSwatches .swatch').forEach((b) => b.classList.toggle('on', b.dataset.id === name));
     applyAccent();
   }
@@ -77,12 +77,12 @@
   A.setTheme = setTheme; A.toggleLightDark = toggleLightDark;
 
   /* ===================================================================== art / online posters */
-  const online = () => ls('zephyr-online') === '1';
+  const online = () => S.get('online') === true;
   const fileUrl = (p) => A.pathToFileUrl(p);
   const YT = /(?:youtube\.com|youtu\.be)\//i;
 
   A.artFor = function (item) {
-    const mode = ls('zephyr-art') || 'frame';
+    const mode = S.get('artMode');
     return mode === 'poster' ? (item.poster || item.thumb || null) : (item.thumb || item.poster || null);
   };
 
@@ -232,6 +232,7 @@
     else { hint.textContent = ''; btn.textContent = 'Look up again'; }
   }
   function openDetails() { const it = A.item; open('detailsPanel'); renderDetails(); if (it && online() && !it.meta) lookup(it, false); }
+  A.openDetails = openDetails;
   on($('detailsBtn'), 'click', () => { close('moreMenu'); openDetails(); });
   on($('closeDetails'), 'click', () => close('detailsPanel'));
   on($('detailsRefresh'), 'click', async () => {
@@ -242,40 +243,51 @@
   on($('detailsOpen'), 'click', () => { const it = A.item; if (it && it.meta && it.meta.url && api()) api().openExternal(it.meta.url); });
 
   function setOnline(v) {
-    ls('zephyr-online', v ? '1' : '0');
-    const c = $('settingOnline'); if (c) c.checked = v;
-    const w = $('welcomeOnline'); if (w) w.checked = v;
-    if (v && A.item) lookup(A.item, false);
+    S.set('online', !!v);
+    const w = $('welcomeOnline'); if (w) w.checked = !!v;
   }
 
-  /* ===================================================================== settings wiring */
-  function syncSettingsUI() {
-    const t = $('settingTheme'); if (t) t.value = root.getAttribute('data-skin') || 'zephyr';
-    const m = $('settingAccentMode'); if (m) m.value = ls('zephyr-accent-mode') || 'theme';
-    const c = $('settingAccentColor'); if (c) c.value = ls('zephyr-accent') || '#38bdf8';
-    const row = $('accentColorRow'); if (row) row.hidden = (ls('zephyr-accent-mode') || 'theme') !== 'custom';
-    const fl = $('settingFsLine'); if (fl) fl.checked = ls('zephyr-fsline') !== '0';
-    const o = $('settingOnline'); if (o) o.checked = online();
-    const a = $('settingArt'); if (a) a.value = ls('zephyr-art') || 'frame';
-    if (api() && api().getSetting) api().getSetting('splash').then((r) => { const s = $('settingSplash'); if (s && r && r.ok) s.checked = r.value !== false; }).catch(() => {});
+  /* ===================================================================== settings -> behaviour */
+  function pushAudioPrefs() {
+    if (api() && api().mpvApplyAudioPrefs) api().mpvApplyAudioPrefs({ limiter: S.get('softLimiter'), normalize: S.get('normalize'), night: S.get('nightMode') }).catch(() => {});
   }
-  A.syncSettingsUI = syncSettingsUI;
-
-  on($('settingAccentMode'), 'change', (e) => { ls('zephyr-accent-mode', e.target.value); const row = $('accentColorRow'); if (row) row.hidden = e.target.value !== 'custom'; applyAccent(); });
-  on($('settingAccentColor'), 'input', (e) => { ls('zephyr-accent', e.target.value); applyAccent(); });
-  on($('settingFsLine'), 'change', (e) => { ls('zephyr-fsline', e.target.checked ? '1' : '0'); body.classList.toggle('fs-line-off', !e.target.checked); });
-  on($('settingSplash'), 'change', (e) => { if (api() && api().setSetting) api().setSetting('splash', !!e.target.checked); });
-  on($('settingOnline'), 'change', (e) => { setOnline(e.target.checked); A.showOSD(e.target.checked ? 'Online posters & info: on' : 'Online posters & info: off'); });
-  on($('settingArt'), 'change', (e) => { ls('zephyr-art', e.target.value); A.renderPlaylist(); });
+  function applySetting(id, v) {
+    switch (id) {
+      case 'theme': setTheme(v); break;
+      case 'accentMode': case 'accentColor': applyAccent(); break;
+      case 'fsLine': body.classList.toggle('fs-line-off', !v); break;
+      case 'splash': if (api() && api().setSetting) api().setSetting('splash', !!v); break;
+      case 'online': { const w = $('welcomeOnline'); if (w) w.checked = !!v; if (v && A.item) lookup(A.item, false); break; }
+      case 'artMode': A.renderPlaylist(); break;
+      case 'seekStep': case 'seekStepBig': case 'autoNext': case 'rememberPos': case 'skipBad': case 'volumeMax': case 'volumeStep': A.setPref(id, v); break;
+      case 'softLimiter': case 'normalize': case 'nightMode': pushAudioPrefs(); break;
+      case 'quality': { const q = $('qualitySelect'); if (q && q.value !== v) { q.value = v; if (A.isMpv()) q.dispatchEvent(new Event('change')); } break; }
+      default: break;
+    }
+  }
+  S.on(null, (v, id) => applySetting(id, v));
+  A.applySetting = applySetting;
+  body.classList.toggle('fs-line-off', !S.get('fsLine'));
+  { const q = $('qualitySelect'); if (q) q.value = S.get('quality'); }
+  pushAudioPrefs();
+  if (api() && api().setSetting) api().getSetting('splash').then((r) => { if (r && r.ok && typeof r.value === 'boolean' && r.value !== S.get('splash')) S.set('splash', r.value, { quiet: true }); }).catch(() => {});
   on($('fetchAllInfoBtn'), 'click', fetchAll);
-  on($('clearOnlineCacheBtn'), 'click', async () => {
+  A.fetchAllInfo = fetchAll;
+  A.clearOnlineCache = async () => {
     if (!api() || !api().onlineClearCache) return;
     const r = await api().onlineClearCache();
     A.itemsFor().forEach((i) => { i.meta = null; i.metaMiss = false; i.poster = null; i.accent = null; });
     A.renderPlaylist();
     A.showOSD('Poster cache cleared (' + ((r && r.removed) || 0) + ' files)');
+  };
+
+  // pause when minimised / hidden, resume on return (opt-in)
+  let pausedByHide = false;
+  document.addEventListener('visibilitychange', () => {
+    if (!S.get('pauseOnMinimize')) return;
+    if (document.hidden) { if (A.isPlaying()) { pausedByHide = true; A.pausePlayback(); } }
+    else if (pausedByHide) { pausedByHide = false; A.resumePlayback(); }
   });
-  body.classList.toggle('fs-line-off', ls('zephyr-fsline') === '0');
 
   /* ===================================================================== immersive fullscreen */
   const FS = { x: -1, y: -1, last: 0, hide: { top: 0, bottom: 0, side: 0 }, pinSide: false, handleUntil: 0, timer: null };
@@ -308,7 +320,7 @@
       if (body.classList.contains(cls)) anyShown = true;
     }
     body.classList.toggle('fs-handle', now < FS.handleUntil && !body.classList.contains('fs-side'));
-    const idle = now - FS.last > 2200;
+    const idle = now - FS.last > (S.get('cursorHide') || 2) * 1000;
     body.classList.toggle('fs-nocursor', idle && !anyShown && !busy);
   }
   function onMove(e) {
@@ -351,7 +363,16 @@
     const note = $('toolsNote'); if (note) note.textContent = r.jsRuntime === 'electron-node' ? 'No deno.exe found: YouTube uses the built-in fallback runtime. Installing deno makes it more reliable.' : (r.canInstall ? '' : 'Automatic install is not available here. See TOOLS.md for the download list.');
     return r;
   }
-  async function openTools() { open('toolsPanel'); return refreshTools(); }
+  async function renderCodecs() {
+    const box = $('codecReport'); if (!box || !api() || !api().codecReport) return;
+    box.textContent = 'Reading the codec list…';
+    const r = await api().codecReport().catch(() => null);
+    if (!r || !r.ok) { box.textContent = 'Codec report unavailable' + (r && r.error ? ': ' + r.error : '') + ' (needs ffmpeg).'; return; }
+    const sec = (title, list) => '<h4>' + esc(title) + '</h4><div class="codec-grid">' + list.map((c) => '<span class="codec ' + (c.ok ? 'ok' : 'no') + '" title="' + esc(c.id) + '">' + (c.ok ? '✓ ' : '✗ ') + esc(c.name) + '</span>').join('') + '</div>';
+    box.innerHTML = '<p class="muted">' + r.total + ' decoders available. Hardware acceleration: ' + esc((r.hwaccels || []).join(', ') || 'none found') + '. This is the ffmpeg build; mpv uses the same codec families.</p>' + sec('Video', r.video) + sec('Audio', r.audio) + sec('Subtitles', r.subtitles);
+  }
+  on($('codecBtn'), 'click', renderCodecs);
+  async function openTools() { open('toolsPanel'); if (api() && api().getEdition) api().getEdition().then((e) => { const el = $('editionLabel'); if (el && e && e.label) el.textContent = e.label; }).catch(() => {}); return refreshTools(); }
   on($('toolsBtn'), 'click', () => { close('moreMenu'); openTools(); });
   on($('closeTools'), 'click', () => close('toolsPanel'));
   on($('toolsRefresh'), 'click', refreshTools);
@@ -392,6 +413,37 @@
   on($('healthFix'), 'click', () => { $('healthBanner').hidden = true; openTools(); });
   on($('healthClose'), 'click', () => { $('healthBanner').hidden = true; });
 
+  /* ===================================================================== when nothing can play it: other players */
+  let failBannerFor = null;
+  async function onPlayFail(item, msg) {
+    const mode = S.get('failAction');
+    if (!item || !item.path || mode === 'never' || !api() || !api().externalList) return;
+    const r = await api().externalList().catch(() => null);
+    const players = (r && r.players) || [];
+    if (!players.length) return;
+    const pref = S.get('externalPlayer');
+    const chosen = players.find((p) => p.id === pref) || players[0];
+    if (mode === 'auto') {
+      const o = await api().externalOpen({ id: chosen.id, file: item.path }).catch(() => null);
+      A.showOSD(o && o.ok ? 'Opened in ' + chosen.name : 'Could not open ' + chosen.name, 3000);
+      return;
+    }
+    failBannerFor = item;
+    const box = $('failBanner'); if (!box) return;
+    $('failText').textContent = 'ZephyrPlayer could not play “' + item.name.slice(0, 50) + '”.';
+    const wrap = $('failPlayers'); wrap.textContent = '';
+    players.slice(0, 4).forEach((p) => {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-primary'; b.textContent = 'Open in ' + p.name + (p.klite ? ' (K-Lite)' : '');
+      b.addEventListener('click', async () => { const o = await api().externalOpen({ id: p.id, file: failBannerFor.path }).catch(() => null); A.showOSD(o && o.ok ? 'Opened in ' + p.name : 'Could not open ' + p.name, 2500); box.hidden = true; });
+      wrap.appendChild(b);
+    });
+    box.hidden = false;
+  }
+  A.holdOnFail = false;
+  A.on('playfail', (item, msg) => { A.holdOnFail = S.get('failAction') === 'ask'; onPlayFail(item, msg); });
+  on($('failClose'), 'click', () => { const b = $('failBanner'); if (b) b.hidden = true; });
+  A.on('itemstart', () => { const b = $('failBanner'); if (b) b.hidden = true; });
+
   /* ===================================================================== clip export */
   let lastClip = null;
   function openClip() {
@@ -423,19 +475,30 @@
   on($('clipShow'), 'click', () => { if (lastClip && api() && api().showItem) api().showItem(lastClip); });
 
   /* ===================================================================== shortcuts */
-  const SHORTCUTS = [
-    ['Playback', [['Space / K', 'Play / pause'], ['← →', 'Seek 10 s (Shift: 30 s)'], ['↑ ↓', 'Volume'], ['[  ]', 'Slower / faster'], ['Home / End', 'Start / end'], ['Shift+P / Shift+N', 'Previous / next'], ['PgUp / PgDn', 'Previous / next chapter (mpv)'], ['. ,', 'Step one frame (paused)']]],
-    ['Window', [['F', 'Fullscreen'], ['Esc', 'Leave fullscreen / close panels'], ['L', 'Show the playlist in fullscreen'], ['D', 'Details & poster'], ['?', 'This list']]],
-    ['Tools', [['A', 'Set A / B / clear loop'], ['S', 'Screenshot'], ['B', 'Bookmark'], ['M', 'Mute'], ['R', 'Repeat off / all / one'], ['Shift+I', 'Playback statistics (mpv)'], ['Ctrl+O', 'Open files'], ['Ctrl+U', 'Open URL']]],
-    ['In the mpv window', [['< >', 'Previous / next item in your playlist'], ['F8', 'Show what is up next'], ['Mouse to the bottom', 'On-screen controller with the seek bar']]],
-    ['In fullscreen', [['Mouse to the bottom', 'Seek bar and buttons'], ['Mouse to the right edge', 'Playlist'], ['Mouse to the top', 'Title bar']]]
-  ];
+  const MOUSE_LABELS = { none: 'nothing', volume: 'volume', seek: 'skip', speed: 'speed', track: 'previous / next item' };
   function renderShortcuts() {
-    const b = $('shortcutsBody'); if (!b || b.dataset.done) return;
-    b.dataset.done = '1';
-    b.innerHTML = SHORTCUTS.map(([g, rows]) => '<h4>' + esc(g) + '</h4><table>' + rows.map(([k, d]) => '<tr><td><kbd>' + esc(k) + '</kbd></td><td>' + esc(d) + '</td></tr>').join('') + '</table>').join('');
+    const b = $('shortcutsBody'); if (!b) return;
+    const C = A.controls;
+    const groups = {};
+    if (C) C.ACTIONS.forEach((a) => { (groups[a.group] = groups[a.group] || []).push(a); });
+    let html = '';
+    for (const g of Object.keys(groups)) {
+      html += '<h4>' + esc(g) + '</h4><table>' + groups[g].map((a) => {
+        const keys = C.effectiveKeys(a.id);
+        return '<tr><td>' + (keys.length ? keys.map((k) => '<kbd>' + esc(C.prettyCombo(k)) + '</kbd>').join(' ') : '<span class="muted">not set</span>') + '</td><td>' + esc(a.label) + '</td></tr>';
+      }).join('') + '</table>';
+    }
+    const w = (id) => MOUSE_LABELS[S.get(id)] || S.get(id);
+    html += '<h4>Mouse</h4><table>' +
+      '<tr><td>Wheel</td><td>' + esc(w('wheel')) + '</td></tr><tr><td>Shift + wheel</td><td>' + esc(w('wheelShift')) + '</td></tr><tr><td>Ctrl + wheel</td><td>' + esc(w('wheelCtrl')) + '</td></tr>' +
+      '<tr><td>Esc</td><td>Leave fullscreen / close panels</td></tr></table>' +
+      '<h4>In fullscreen</h4><table><tr><td>Mouse to the bottom</td><td>Seek bar and buttons</td></tr><tr><td>Mouse to the right edge</td><td>Playlist</td></tr><tr><td>Mouse to the top</td><td>Title bar</td></tr></table>' +
+      '<h4>In the mpv window</h4><table><tr><td><kbd>&lt;</kbd> <kbd>&gt;</kbd></td><td>Previous / next item in your playlist</td></tr><tr><td><kbd>F8</kbd></td><td>Show what is up next</td></tr></table>' +
+      '<p class="settings-note">Change any of these in Settings &gt; Keys &amp; mouse.</p>';
+    b.innerHTML = html;
   }
   function openShortcuts() { renderShortcuts(); open('shortcutsPanel'); }
+  A.openShortcuts = openShortcuts;
   on($('shortcutsBtn'), 'click', () => { close('moreMenu'); openShortcuts(); });
   on($('closeShortcuts'), 'click', () => close('shortcutsPanel'));
   on($('guideBtn'), 'click', () => { close('moreMenu'); if (api() && api().openDocs) api().openDocs('guide').then((r) => { if (r && !r.ok) A.showOSD('User guide not found next to the app'); }); });
@@ -449,7 +512,7 @@
       b.type = 'button'; b.className = 'swatch'; b.dataset.id = t.id; b.title = t.name;
       b.style.background = 'linear-gradient(135deg,' + t.bg + ' 55%,' + t.ac + ' 55%)';
       b.innerHTML = '<span>' + esc(t.name) + '</span>';
-      b.addEventListener('click', () => setTheme(t.id));
+      b.addEventListener('click', () => S.set('theme', t.id));
       box.appendChild(b);
     });
     box.querySelectorAll('.swatch').forEach((b) => b.classList.toggle('on', b.dataset.id === root.getAttribute('data-skin')));
@@ -563,23 +626,14 @@
     else if (key === 'guide' && api().openDocs) api().openDocs('guide');
     else if (key === 'queue') showQueue();
   });
-  document.addEventListener('keydown', (e) => {
-    const t = e.target, tag = t && t.tagName;
-    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || (t && t.isContentEditable) || e.ctrlKey || e.metaKey || e.altKey) return;
-    const k = e.key;
-    if (k === '?') { e.preventDefault(); openShortcuts(); }
-    else if (k === 'd' || k === 'D') { e.preventDefault(); openDetails(); }
-    else if (k === 'l' || k === 'L') {
-      if (inFs()) { e.preventDefault(); FS.pinSide = !FS.pinSide; evaluate(); }
-      else { const b = $('toggleSidebar'); if (b) b.click(); }
-    }
-  });
+  A.playlistToggle = function () {
+    if (inFs()) { FS.pinSide = !FS.pinSide; evaluate(); }
+    else { const b = $('toggleSidebar'); if (b) b.click(); }
+  };
 
   /* ===================================================================== boot */
   (function boot() {
-    let saved = ls('zephyr-skin') || 'zephyr';
-    setTheme(saved);
-    syncSettingsUI();
+    setTheme(S.get('theme'));
     renderShelf();
     setTimeout(healthCheck, 2500);
     setTimeout(maybeWelcome, 900);

@@ -10,6 +10,8 @@ const MEDIA_EXT = new Set((
 ).split(' ').map(e => '.' + e));
 const SUB_EXT = new Set(['.srt', '.vtt', '.ass', '.ssa']);
 
+const PLAYLIST_EXT = new Set(['.m3u', '.m3u8', '.pls']);
+const isPlaylist = (p) => PLAYLIST_EXT.has(path.extname(String(p || '')).toLowerCase());
 const isMedia = (p) => MEDIA_EXT.has(path.extname(String(p || '')).toLowerCase());
 const isSub = (p) => SUB_EXT.has(path.extname(String(p || '')).toLowerCase());
 const isUrl = (s) => /^[a-z][a-z0-9+.-]*:\/\//i.test(String(s || '')) && !/^file:\/\//i.test(String(s));
@@ -22,6 +24,7 @@ const naturalCompare = (a, b) => String(a).localeCompare(String(b), undefined, {
 async function expandPaths(inputs, { maxFiles = 5000, maxDepth = 8 } = {}) {
   const media = [];
   const subs = [];
+  const streams = [];
   const seen = new Set();
 
   async function walk(dir, depth) {
@@ -41,6 +44,7 @@ async function expandPaths(inputs, { maxFiles = 5000, maxDepth = 8 } = {}) {
     const key = full.toLowerCase();
     if (seen.has(key)) return;
     if (isSub(full)) { seen.add(key); subs.push(full); return; }
+    if (isPlaylist(full)) { seen.add(key); await addPlaylist(full); return; }
     if (!explicit && !isMedia(full)) return;
     let size = 0;
     try { const st = await fs.promises.stat(full); if (!st.isFile()) return; size = st.size; } catch { return; }
@@ -48,14 +52,25 @@ async function expandPaths(inputs, { maxFiles = 5000, maxDepth = 8 } = {}) {
     media.push({ path: full, name: path.basename(full), size });
   }
 
+  async function addPlaylist(file) {
+    let text = '';
+    try { const st = await fs.promises.stat(file); if (st.size > 4 * 1024 * 1024) return; text = await fs.promises.readFile(file, 'utf8'); } catch { return; }
+    const entries = /\.pls$/i.test(file) ? parsePls(text, path.dirname(file)) : parseM3u(text, path.dirname(file));
+    for (const e of entries.slice(0, maxFiles)) {
+      if (isUrl(e.path)) streams.push({ url: e.path, title: e.title });
+      else await addFile(e.path, true);
+    }
+  }
+
   for (const raw of Array.isArray(inputs) ? inputs : []) {
     if (typeof raw !== 'string' || !raw) continue;
+    if (isUrl(raw)) { streams.push({ url: raw, title: raw }); continue; }
     let st;
     try { st = await fs.promises.stat(raw); } catch { continue; }
     if (st.isDirectory()) await walk(raw, 0);
     else if (st.isFile()) await addFile(raw, true);
   }
-  return { media, subs };
+  return { media, subs, streams };
 }
 
 /** Subtitle files next to a media file: "movie.srt", "movie.en.srt", "movie.English.ass" ... */
@@ -89,6 +104,21 @@ function parseM3u(text, baseDir) {
   return out;
 }
 
+function parsePls(text, baseDir) {
+  const files = {}, titles = {};
+  for (const line of String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/)) {
+    const m = /^(File|Title)(\d+)\s*=\s*(.+)$/i.exec(line.trim());
+    if (!m) continue;
+    (m[1].toLowerCase() === 'file' ? files : titles)[m[2]] = m[3].trim();
+  }
+  return Object.keys(files).sort((a, b) => a - b).map((k) => {
+    let p = files[k];
+    if (/^file:\/\//i.test(p)) { try { p = fileURLToPath(p); } catch {} }
+    else if (!isUrl(p) && baseDir && !path.isAbsolute(p)) p = path.resolve(baseDir, p);
+    return { path: p, title: titles[k] || (isUrl(p) ? p : path.basename(p)) };
+  });
+}
+
 function buildM3u(entries) {
   const lines = ['#EXTM3U'];
   for (const e of entries || []) {
@@ -113,4 +143,4 @@ function argvPaths(argv, { appDir } = {}) {
   return out;
 }
 
-module.exports = { MEDIA_EXT, SUB_EXT, isMedia, isSub, isUrl, naturalCompare, expandPaths, findSidecarSubs, parseM3u, buildM3u, argvPaths };
+module.exports = { MEDIA_EXT, SUB_EXT, PLAYLIST_EXT, isPlaylist, parsePls, isMedia, isSub, isUrl, naturalCompare, expandPaths, findSidecarSubs, parseM3u, buildM3u, argvPaths };

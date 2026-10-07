@@ -20,6 +20,8 @@
 .PARAMETER TestOnly       Do not download anything; only run the checks and self-tests.
 .PARAMETER SkipTests      Install only; skip the self-tests.
 .PARAMETER DryRun         Only print what would be downloaded; change nothing.
+.PARAMETER Edition        auto (default) | modern | legacy. "legacy" is for Windows 7 / 8 / 8.1: it uses QuickJS (Deno needs Windows 10),
+                  32-bit downloads on 32-bit Windows, and nothing that needs PowerShell 5. "auto" picks it from your Windows version.
 .PARAMETER Whisper        (kept for old command lines: whisper is installed by default now)
 .PARAMETER WhisperModel   (kept for old command lines: the model is installed by default now)
 
@@ -41,6 +43,7 @@ param(
   [switch]$TestOnly,
   [switch]$SkipTests,
   [switch]$DryRun,
+  [ValidateSet('auto', 'modern', 'legacy')][string]$Edition = 'auto',
   [switch]$Whisper,
   [switch]$WhisperModel
 )
@@ -52,6 +55,12 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 $Root = $PSScriptRoot
 if ([string]::IsNullOrEmpty($Root)) { $Root = (Get-Location).Path }
 if ($ModelName -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid -ModelName '$ModelName'" }
+# ---- which edition? (Windows 7 / 8 / 8.1 = legacy; the Windows version is read the reliable way)
+$WinVersion = [version]'10.0'
+try { $WinVersion = [version](Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop).Version } catch { try { $WinVersion = [Environment]::OSVersion.Version } catch {} }
+$IsLegacy = ($Edition -eq 'legacy') -or (($Edition -eq 'auto') -and ($WinVersion.Major -lt 10))
+$Is64 = [Environment]::Is64BitOperatingSystem
+$UseQuickJs = $IsLegacy
 $DoWhisper = (-not $SkipWhisper)
 $DoModel = ($DoWhisper -and (-not $SkipModel))
 
@@ -98,6 +107,13 @@ function Get-GitHubAsset([string]$repo, [string[]]$patterns) {
     if ($a) { return $a }
   }
   throw "No matching download found in the latest $repo release"
+}
+
+# Expand-Archive only exists from PowerShell 5 (Windows 8.1 ships PowerShell 4): use .NET so it works everywhere
+function Expand-Zip([string]$zip, [string]$dest) {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  if (Test-Path $dest) { Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue }
+  [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
 }
 
 function Need([string]$path) { return ($Force -or -not (Test-Path $path)) }
@@ -220,28 +236,34 @@ function Run-SelfTests {
     }
   }
 
-  # ---- deno: really runs JavaScript (yt-dlp needs this for YouTube)
-  if (-not (Test-Path $deno)) { Add-Test 'deno runs JavaScript' 'FAIL' 'deno.exe is missing' }
+  # ---- JavaScript runtime: really runs JavaScript (yt-dlp needs this for YouTube). Deno on Windows 10+, QuickJS on Windows 7 / 8 / 8.1
+  $qjs = Join-Path $Root 'qjs.exe'
+  $jsKind = 'deno'
+  $jsExe = $deno
+  if ($UseQuickJs -and (Test-Path $qjs)) { $jsKind = 'quickjs'; $jsExe = $qjs }
+  elseif ((-not (Test-Path $deno)) -and (Test-Path $qjs)) { $jsKind = 'quickjs'; $jsExe = $qjs }
+  if (-not (Test-Path $jsExe)) { Add-Test ($jsKind + ' runs JavaScript') 'FAIL' ($jsKind + ' is missing') }
   else {
-    $r = Invoke-Tool $deno @('eval', 'console.log(6*7)') 40
-    if ($r.Code -eq 0 -and $r.Out -match '42') { Add-Test 'deno runs JavaScript' 'PASS' }
-    else { Add-Test 'deno runs JavaScript' 'FAIL' (Last-Line ($r.Err + "`n" + $r.Out)) }
+    if ($jsKind -eq 'quickjs') { $r = Invoke-Tool $jsExe @('-e', 'console.log(6*7)') 40 }
+    else { $r = Invoke-Tool $jsExe @('eval', 'console.log(6*7)') 40 }
+    if ($r.Code -eq 0 -and $r.Out -match '42') { Add-Test ($jsKind + ' runs JavaScript') 'PASS' }
+    else { Add-Test ($jsKind + ' runs JavaScript') 'FAIL' (Last-Line ($r.Err + "`n" + $r.Out)) }
   }
 
   # ---- yt-dlp: starts, and resolves a REAL YouTube video using deno
   if (-not (Test-Path $ytdlp)) { Add-Test 'yt-dlp resolves a YouTube video' 'FAIL' 'yt-dlp.exe is missing' }
   else {
     $ytArgs = @('--no-warnings', '--no-playlist', '--skip-download', '--print', '%(title)s')
-    if (Test-Path $deno) { $ytArgs += @('--js-runtimes', ('deno:' + ($deno -replace '\\', '/'))) }
+    if (Test-Path $jsExe) { $ytArgs += @('--js-runtimes', ($jsKind + ':' + ($jsExe -replace '\\', '/'))) }
     $ytArgs += @('--', 'https://www.youtube.com/watch?v=jNQXAC9IVRw')
     $r = Invoke-Tool $ytdlp $ytArgs 90
     $title = (Last-Line $r.Out)
     $all = $r.Err + "`n" + $r.Out
-    if ($r.Code -eq 0 -and $title.Length -gt 0) { Add-Test 'yt-dlp resolves a YouTube video (with deno)' 'PASS' ("got title: '" + $title + "'") }
-    elseif ($all -match 'Sign in|not a bot') { Add-Test 'yt-dlp resolves a YouTube video (with deno)' 'WARN' 'YouTube asked for sign-in on this connection. In the app pick your browser under "Use cookies from" in the link panel.' }
-    elseif ($all -match 'JavaScript runtime|jsc|EJS') { Add-Test 'yt-dlp resolves a YouTube video (with deno)' 'FAIL' 'yt-dlp could not use a JavaScript runtime. Re-run setup-tools.bat -Force to reinstall deno.' }
-    elseif ($r.Code -eq -999 -or $all -match 'getaddrinfo|Temporary failure|timed out|Unable to download|URLError|SSL|Connection|Network|resolve') { Add-Test 'yt-dlp resolves a YouTube video (with deno)' 'WARN' 'could not reach YouTube from here (offline or blocked). The tool itself starts fine.' }
-    else { Add-Test 'yt-dlp resolves a YouTube video (with deno)' 'FAIL' (Last-Line $all) }
+    if ($r.Code -eq 0 -and $title.Length -gt 0) { Add-Test 'yt-dlp resolves a YouTube video (with the JS runtime)' 'PASS' ("got title: '" + $title + "'") }
+    elseif ($all -match 'Sign in|not a bot') { Add-Test 'yt-dlp resolves a YouTube video (with the JS runtime)' 'WARN' 'YouTube asked for sign-in on this connection. In the app pick your browser under "Use cookies from" in the link panel.' }
+    elseif ($all -match 'JavaScript runtime|jsc|EJS') { Add-Test 'yt-dlp resolves a YouTube video (with the JS runtime)' 'FAIL' 'yt-dlp could not use a JavaScript runtime. Re-run setup-tools.bat -Force to reinstall it.' }
+    elseif ($r.Code -eq -999 -or $all -match 'getaddrinfo|Temporary failure|timed out|Unable to download|URLError|SSL|Connection|Network|resolve') { Add-Test 'yt-dlp resolves a YouTube video (with the JS runtime)' 'WARN' 'could not reach YouTube from here (offline or blocked). The tool itself starts fine.' }
+    else { Add-Test 'yt-dlp resolves a YouTube video (with the JS runtime)' 'FAIL' (Last-Line $all) }
   }
 
   # ---- whisper: loads the model and transcribes real speech (made with the built-in Windows voice)
@@ -294,6 +316,7 @@ function Run-SelfTests {
 
 New-Item -ItemType Directory -Path $Tmp -Force | Out-Null
 Say ("ZephyrPlayer tool setup  ->  " + $Root) 'White'
+Say ('Windows ' + $WinVersion + ' (' + $(if ($Is64) { '64-bit' } else { '32-bit' }) + ')  ->  ' + $(if ($IsLegacy) { 'LEGACY edition (QuickJS, PowerShell-4 safe)' } else { 'MODERN edition' })) 'White'
 if ($DryRun) { Say 'DRY RUN: nothing will be downloaded or changed.' 'Yellow' }
 if ($TestOnly) { Say 'TEST ONLY: nothing will be downloaded.' 'Yellow' }
 
@@ -307,6 +330,7 @@ try {
       $dest = Join-Path $Root 'yt-dlp.exe'
       if (-not (Need $dest)) { Say '   already present (skipped)'; Record 'yt-dlp.exe' 'present'; return }
       $url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
+      if (-not $Is64) { $url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_x86.exe' }
       if ($DryRun) { Say ("   would download " + $url); Record 'yt-dlp.exe' 'dry-run'; return }
       $f = Join-Path $Tmp 'yt-dlp.exe'
       Download $url $f
@@ -314,21 +338,43 @@ try {
       Record 'yt-dlp.exe' 'installed'
     }
 
-    # ------------------------------------------------------------------ deno
-    Step 'deno (JavaScript runtime yt-dlp needs for YouTube)'
-    Run-Tool 'deno.exe' {
-      $dest = Join-Path $Root 'deno.exe'
-      if (-not (Need $dest)) { Say '   already present (skipped)'; Record 'deno.exe' 'present'; return }
-      $url = 'https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip'
-      if ($DryRun) { Say ("   would download " + $url); Record 'deno.exe' 'dry-run'; return }
-      $zip = Join-Path $Tmp 'deno.zip'
-      $dir = Join-Path $Tmp 'deno'
-      Download $url $zip
-      Expand-Archive -Path $zip -DestinationPath $dir -Force
-      $exe = Find-File $dir 'deno.exe'
-      if (-not $exe) { throw 'deno.exe not found inside the archive' }
-      Copy-Safe $exe.FullName $dest
-      Record 'deno.exe' 'installed'
+    # ------------------------------------------------------------------ JavaScript runtime for YouTube
+    if ($UseQuickJs) {
+      Step 'QuickJS (JavaScript runtime yt-dlp needs for YouTube; Deno does not run on Windows 7 / 8 / 8.1)'
+      Run-Tool 'qjs.exe' {
+        $dest = Join-Path $Root 'qjs.exe'
+        if (-not (Need $dest)) { Say '   already present (skipped)'; Record 'qjs.exe' 'present'; return }
+        $arch = 'x86_64'
+        if (-not $Is64) { $arch = 'x86' }
+        $asset = Get-GitHubAsset 'quickjs-ng/quickjs' @(('^qjs-windows-' + $arch + '\.exe$'), ('^qjs-windows-' + $arch + '.*\.zip$'), ('^qjs.*windows.*' + $arch + '.*'))
+        if ($DryRun) { Say ("   would download " + $asset.browser_download_url); Record 'qjs.exe' 'dry-run'; return }
+        $f = Join-Path $Tmp $asset.name
+        Download $asset.browser_download_url $f
+        if ($asset.name -match '\.zip$') {
+          $dir = Join-Path $Tmp 'qjs'
+          Expand-Zip $f $dir
+          $exe = Find-File $dir 'qjs.exe'
+          if (-not $exe) { throw 'qjs.exe not found inside the archive' }
+          Copy-Safe $exe.FullName $dest
+        } else { Copy-Safe $f $dest }
+        Record 'qjs.exe' 'installed' $asset.name
+      }
+    } else {
+      Step 'deno (JavaScript runtime yt-dlp needs for YouTube)'
+      Run-Tool 'deno.exe' {
+        $dest = Join-Path $Root 'deno.exe'
+        if (-not (Need $dest)) { Say '   already present (skipped)'; Record 'deno.exe' 'present'; return }
+        $url = 'https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip'
+        if ($DryRun) { Say ("   would download " + $url); Record 'deno.exe' 'dry-run'; return }
+        $zip = Join-Path $Tmp 'deno.zip'
+        $dir = Join-Path $Tmp 'deno'
+        Download $url $zip
+        Expand-Zip $zip $dir
+        $exe = Find-File $dir 'deno.exe'
+        if (-not $exe) { throw 'deno.exe not found inside the archive' }
+        Copy-Safe $exe.FullName $dest
+        Record 'deno.exe' 'installed'
+      }
     }
 
     # ------------------------------------------------------------------ mpv
@@ -337,7 +383,8 @@ try {
       $dest = Join-Path $Root 'mpv.exe'
       if (-not (Need $dest)) { Say '   already present (skipped)'; Record 'mpv.exe' 'present'; return }
       # shinchiro builds: plain x86_64 works on every PC (the "-v3" build needs a newer CPU with AVX2)
-      $asset = Get-GitHubAsset 'shinchiro/mpv-winbuild-cmake' @('^mpv-x86_64-\d{8}-git-[0-9a-f]+\.7z$', '^mpv-x86_64-\d.*\.7z$')
+      if ($Is64) { $asset = Get-GitHubAsset 'shinchiro/mpv-winbuild-cmake' @('^mpv-x86_64-\d{8}-git-[0-9a-f]+\.7z$', '^mpv-x86_64-\d.*\.7z$') }
+      else { $asset = Get-GitHubAsset 'shinchiro/mpv-winbuild-cmake' @('^mpv-i686-\d{8}-git-[0-9a-f]+\.7z$', '^mpv-i686-\d.*\.7z$') }
       if ($DryRun) { Say ("   would download " + $asset.browser_download_url); Record 'mpv.exe' 'dry-run'; return }
       # .7z needs the tiny standalone 7-Zip extractor (PowerShell cannot open .7z by itself)
       $sevenZip = Join-Path $Tmp '7zr.exe'
@@ -378,7 +425,7 @@ try {
         }
         if (-not $ok) { throw 'All ffmpeg download sources failed' }
         $dir = Join-Path $Tmp 'ffmpeg'
-        Expand-Archive -Path $zip -DestinationPath $dir -Force
+        Expand-Zip $zip $dir
         $a = Find-File $dir 'ffmpeg.exe'
         $b = Find-File $dir 'ffprobe.exe'
         if (-not $a -or -not $b) { throw 'ffmpeg.exe / ffprobe.exe not found inside the archive' }
@@ -395,15 +442,17 @@ try {
         $dest = Join-Path $Root 'whisper-cli.exe'
         if (-not (Need $dest)) { Say '   already present (skipped)'; Record 'whisper-cli.exe' 'present'; return }
         $url = 'https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip'
+        if (-not $Is64) { $url = 'https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-Win32.zip' }
         try {
-          $asset = Get-GitHubAsset 'ggml-org/whisper.cpp' @('^whisper-bin-x64\.zip$', '^whisper-bin-.*x64.*\.zip$')
+          if ($Is64) { $asset = Get-GitHubAsset 'ggml-org/whisper.cpp' @('^whisper-bin-x64\.zip$', '^whisper-bin-.*x64.*\.zip$') }
+          else { $asset = Get-GitHubAsset 'ggml-org/whisper.cpp' @('^whisper-bin-Win32\.zip$', '^whisper-bin-.*(Win32|x86).*\.zip$') }
           $url = $asset.browser_download_url
         } catch { Say '   (could not read the release list, using the standard download link)' 'DarkGray' }
         if ($DryRun) { Say ("   would download " + $url); Record 'whisper-cli.exe' 'dry-run'; return }
         $zip = Join-Path $Tmp 'whisper.zip'
         $dir = Join-Path $Tmp 'whisper'
         Download $url $zip
-        Expand-Archive -Path $zip -DestinationPath $dir -Force
+        Expand-Zip $zip $dir
         $exe = Find-File $dir 'whisper-cli.exe'
         if (-not $exe) { throw 'whisper-cli.exe not found inside the archive (the release layout may have changed)' }
         Copy-Safe $exe.FullName $dest
@@ -466,13 +515,17 @@ try {
       @{ n = 'mpv';     p = (Join-Path $Root 'mpv.exe');            v = $mpvVer;                                 a = @('--version') },
       @{ n = 'yt-dlp';  p = (Join-Path $Root 'yt-dlp.exe');         v = (Join-Path $Root 'yt-dlp.exe');          a = @('--version') },
       @{ n = 'deno';    p = (Join-Path $Root 'deno.exe');           v = (Join-Path $Root 'deno.exe');            a = @('--version') },
+      @{ n = 'quickjs'; p = (Join-Path $Root 'qjs.exe');            v = (Join-Path $Root 'qjs.exe');             a = @('--help') },
       @{ n = 'ffmpeg';  p = (Join-Path $Root 'ffmpeg\ffmpeg.exe');  v = (Join-Path $Root 'ffmpeg\ffmpeg.exe');   a = @('-version') },
       @{ n = 'ffprobe'; p = (Join-Path $Root 'ffmpeg\ffprobe.exe'); v = (Join-Path $Root 'ffmpeg\ffprobe.exe');  a = @('-version') },
       @{ n = 'whisper'; p = (Join-Path $Root 'whisper-cli.exe');    v = $null;                                   a = @() }
     )
     foreach ($c in $checks) {
       if (-not (Test-Path $c.p)) {
-        if ($c.n -eq 'whisper') { Say ("   {0,-8} not installed (optional)" -f $c.n) 'DarkGray' } else { Say ("   {0,-8} MISSING" -f $c.n) 'Red' }
+        if ($c.n -eq 'whisper') { Say ("   {0,-8} not installed (optional)" -f $c.n) 'DarkGray' }
+        elseif ($c.n -eq 'deno' -and $UseQuickJs) { Say ("   {0,-8} not needed on this Windows (QuickJS is used)" -f $c.n) 'DarkGray' }
+        elseif ($c.n -eq 'quickjs' -and -not $UseQuickJs) { Say ("   {0,-8} not needed (Deno is used)" -f $c.n) 'DarkGray' }
+        else { Say ("   {0,-8} MISSING" -f $c.n) 'Red' }
         continue
       }
       $ver = 'installed'

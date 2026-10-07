@@ -711,6 +711,19 @@
   </div>
 
 
+
+  <div class="settings-panel settings-center" id="settingsCenter" role="dialog" aria-label="Settings" hidden>
+    <div class="sc-top">
+      <h2>Settings</h2>
+      <div class="sc-search"><span class="zi" data-icon="search"></span><input id="scSearch" type="search" placeholder="Search settings…" spellcheck="false" data-tip="Type a word like volume, subtitle or fullscreen to find any setting." /></div>
+      <label class="sc-adv" data-tip="Shows the extra options for power users. The defaults are already good, so you can leave this off."><input type="checkbox" id="scAdvanced" /> Show advanced settings</label>
+      <button class="icon-btn" id="scClose" title="Close"><span class="zi" data-icon="close"></span></button>
+    </div>
+    <div class="sc-main"><nav id="scNav" class="sc-nav"></nav><section id="scBody" class="sc-body"></section></div>
+    <div class="sc-foot"><span id="scChanged"></span><span class="muted">Hover over any setting for a short explanation</span></div>
+    <input type="file" id="settingsImportFile" accept=".json,application/json" hidden />
+  </div>
+
   <div class="settings-panel settings-panel-lg" id="detailsPanel" hidden>
     <div class="settings-header"><h3>Details</h3><button class="icon-btn" id="closeDetails"><span class="zi" data-icon="close"></span></button></div>
     <div class="settings-body details-body">
@@ -749,6 +762,9 @@
         <button class="btn btn-ghost" id="toolsDocs">Open TOOLS.md</button>
       </div>
       <p class="settings-note" id="toolsNote"></p>
+      <p class="settings-note"><b id="editionLabel"></b></p>
+      <div class="setting-btns"><button class="btn btn-ghost" id="codecBtn" title="Lists which video, audio and subtitle formats this install can decode">Show codec support</button></div>
+      <div id="codecReport" class="codec-report"></div>
     </div>
   </div>
 
@@ -784,12 +800,17 @@
     </div>
   </div>
 
+  <div class="health-banner fail-banner" id="failBanner" hidden><span id="failText"></span><span id="failPlayers"></span><button class="icon-btn" id="failClose" title="Dismiss"><span class="zi" data-icon="close"></span></button></div>
+
   <div class="health-banner" id="healthBanner" hidden><span id="healthText"></span><button class="btn btn-primary" id="healthFix">Fix it</button><button class="icon-btn" id="healthClose"><span class="zi" data-icon="close"></span></button></div>
   <script src="js/subtitle-parser.js"></script>
   <script src="js/media-name.js"></script>
   <script src="js/icons-default.js"></script>
   <script src="js/icons.js"></script>
+  <script src="js/settings-store.js"></script>
   <script src="js/player.js"></script>
   <script src="js/features.js"></script>
+  <script src="js/controls.js"></script>
+  <script src="js/settings-ui.js"></script>
 </body>
 </html>

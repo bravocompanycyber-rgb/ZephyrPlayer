@@ -1,12 +1,27 @@
+# ZephyrPlayer upgrade v5
+
+## v5: settings, controls, volume, robustness, editions
+- **Settings centre** (gear / Ctrl+,): nine groups from Basic to Advanced, a hover explanation on every setting, per-setting / per-section / reset-all, search, export / import.
+  Fixes a real bug: skip step, auto-next and remember-position were never saved and reset on every launch. All settings are validated, versioned and corruption-proof.
+- **Keys and mouse**: every shortcut rebindable (capture, conflicts handled), mouse wheel / Shift / Ctrl, click, double-click, middle and thumb buttons configurable; also applied in the mpv window.
+- **Volume**: up to 300% (default limit 200%) with a soft limiter, loudness evening and night mode in one audio chain; the browser engine hands over to mpv for boost.
+- **Hang protection**: frozen mpv detected and restarted at the same position, force-kill when it will not quit, open-timeout, stalled-stream reconnect, safe-mode fallback for bad option typos.
+- **Other players / K-Lite**: detects MPC-HC (K-Lite), MPC-BE, VLC, PotPlayer, KMPlayer and offers or automatically does a hand-over when nothing built-in can play a file. Codec support report.
+- **File associations** written properly (no admin needed) + `.m3u/.m3u8/.pls` open as playlists. (The old .reg export had double-escaped paths: fixed.)
+- **Editions**: Modern and Legacy (Windows 7 / 8 / 8.1, Electron 22.3.27) with a merge tool that never replaces your package.json; setup script works on PowerShell 4 and uses QuickJS on old Windows.
+- Verified: all main-process tests also pass on Node 16; interface code parses as ES2022 and uses no post-Chromium-108 features.
+
 # ZephyrPlayer upgrade v4
 
 ## Install (keep folder layout, back up first)
     root:   main.js preload.js mpv-ipc.js mpv-session.js mpv-controller.js media-utils.js media-probe.js media-tools.js online-meta.js
+            engine-config.js external-players.js file-assoc.js edition.js
             index.html splash.html setup-tools.ps1 setup-tools.bat README.md TOOLS.md
-    js/:    player.js features.js subtitle-parser.js media-name.js icons.js icons-default.js
+    js/:    player.js features.js controls.js settings-store.js settings-ui.js subtitle-parser.js media-name.js icons.js icons-default.js
     css/:   style.css
     assets/icons/: all 80 icons + README.md + icon-sheet.html (your own zephyrplayer.ico/tray.png stay untouched)
     tests/: optional test suite (node tests/run-all.js)
+    editions/: apply-edition.js, build-edition.bat, README.md
     package.json: if it has build.files, include the new root .js files, splash.html, setup-tools.ps1, README.md, TOOLS.md and assets/**
 
 ## Update: tools that are proven, not just present

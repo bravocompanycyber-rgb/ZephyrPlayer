@@ -68,9 +68,15 @@
   let shuffle = false;
   let abLoop = { a: null, b: null, active: false };
   let externalSubs = [];
-  let seekStep = 10;
-  let autoNext = true;
-  let rememberPos = true;
+  const Z = window.ZSettings || { get: (id) => undefined, on: () => {}, set: () => {} };
+  const pref = (id, d) => { const v = Z.get(id); return v === undefined ? d : v; };
+  let seekStep = pref('seekStep', 10);
+  let seekStepBig = pref('seekStepBig', 30);
+  let autoNext = pref('autoNext', true);
+  let rememberPos = pref('rememberPos', true);
+  let skipBad = pref('skipBad', true);
+  let volumeMax = pref('volumeMax', 200) / 100;       // 1.0 = 100%
+  let volumeStep = pref('volumeStep', 5) / 100;
   let osdTimer = null;
 
   // Utils
@@ -249,6 +255,7 @@
     }, 600);
   }
   function restorePlaylist() {
+    if (!pref('restorePlaylist', true)) return;
     let saved;
     try { saved = JSON.parse(lsGet('zephyr-playlist-v1') || 'null'); } catch { saved = null; }
     if (!saved || !Array.isArray(saved.items) || !saved.items.length || playlist.length) return;
@@ -286,14 +293,21 @@
     const a = api();
     paths = (paths || []).filter(p => typeof p === 'string' && p);
     if (!paths.length) return;
-    let media = [], subs = [];
+    let media = [], subs = [], streams = [];
     if (a && a.expandPaths) {
       const r = await a.expandPaths(paths).catch(() => null);
-      if (r) { media = r.media || []; subs = r.subs || []; }
+      if (r) { media = r.media || []; subs = r.subs || []; streams = r.streams || []; }
     } else {
       media = paths.map(p => ({ path: p, name: p.split(/[/\\]/).pop(), size: 0 }));
     }
-    if (!media.length && !subs.length) { showOSD('No playable media found'); return; }
+    if (!media.length && !subs.length && !streams.length) { showOSD('No playable media found'); return; }
+    // links found in playlist files (.m3u / .pls) or dropped as text
+    let firstStream = -1;
+    for (const st of streams) {
+      if (playlist.some((i) => i.stream && i.url === st.url)) continue;
+      playlist.push(makeStreamItem(st.url, st.title && st.title !== st.url ? st.title : ''));
+      if (firstStream < 0) firstStream = playlist.length - 1;
+    }
 
     const byPath = new Map(playlist.map((it, i) => [it.path, i]));
     let firstIdx = -1;
@@ -311,6 +325,8 @@
     fresh.forEach(probeItem);                       // durations / codecs / posters fill in as they are read
     if (!media.length && subs.length) { loadSubFromPath(subs[0]); return; }
     if (media.length > 1) showOSD(media.length + ' files added');
+    if (firstIdx < 0 && firstStream >= 0) firstIdx = firstStream;
+    if (streams.length) { renderPlaylist(); if (streams.length > 1) showOSD(streams.length + ' links added'); }
     if (firstIdx >= 0 && (opts.play || currentIndex === -1)) playIndex(firstIdx);
     savePlaylistSoon();
   }
@@ -668,10 +684,10 @@
     try {
       res = item.stream
         ? await a.mpvPlayUrl(item.url, common.quality, true, {
-            startPos: common.startPos, volume: common.volume, mute: common.mute, cookies: lsGet('zephyr-ytCookies') || '',
+            startPos: common.startPos, volume: common.volume, mute: common.mute, cookies: lsGet('zephyr-ytCookies') || '', cfg: window.ZApp ? window.ZApp.engineCfg() : undefined,
             vo: lsGet('zephyr-settingVo') || 'gpu', hwdec: lsGet('zephyr-settingHwdec') || 'auto', perf: lsGet('zephyr-settingPerf') || 'smooth'
           })
-        : await a.mpvPlayExternal(Object.assign({ files: [item.path],
+        : await a.mpvPlayExternal(Object.assign({ files: [item.path], cfg: window.ZApp ? window.ZApp.engineCfg() : undefined,
             vo: lsGet('zephyr-settingVo') || 'gpu', hwdec: lsGet('zephyr-settingHwdec') || 'auto', perf: lsGet('zephyr-settingPerf') || 'smooth' }, common));
     } catch (e) { res = { ok: false, error: e && e.message }; }
     if (token !== loadToken) return;
@@ -715,7 +731,8 @@
     const readTime = clamp(msg.length * 70, 3500, 9000);   // long, helpful messages stay readable
     showOSD(msg.slice(0, 220), readTime);
     errorStreak++;
-    if (autoNext && playlist.length > 1 && errorStreak < playlist.length) {
+    if (window.ZApp) window.ZApp.emit('playfail', playlist[currentIndex], msg);
+    if (skipBad && playlist.length > 1 && errorStreak < playlist.length && !(window.ZApp && window.ZApp.holdOnFail)) {
       const token = loadToken;
       setTimeout(() => { if (token === loadToken) step(1); }, readTime + 400);
     }
@@ -801,6 +818,8 @@
     if (video.paused) video.play().catch(() => {}); else video.pause();
   }
   function pausePlayback() { if (isMpv()) mpvSet('pause', true); else video.pause(); }
+  function resumePlayback() { if (isMpv()) mpvSet('pause', false); else if (video.getAttribute('src')) video.play().catch(() => {}); }
+  function isPlaying() { return isMpv() ? (mp.active && !mp.paused) : (!!video.getAttribute('src') && !video.paused); }
   function updatePlayIcon(playing) {
     iconPlay.hidden = playing;
     iconPause.hidden = !playing;
@@ -878,15 +897,27 @@
     setBtnIcon(muteBtn, userMuted || volumeLevel === 0 ? 'volume-mute' : (volumeLevel < 0.5 ? 'volume-low' : 'volume-high'));
   }
   function setVolume(val, opts = {}) {
-    val = clamp(Number(val) || 0, 0, 1.5);
+    val = clamp(Number(val) || 0, 0, volumeMax);
     volumeLevel = val;
     video.volume = Math.min(1, val);
     volumeSlider.value = val;
     if (!opts.keepMute && val > 0) { userMuted = false; video.muted = false; if (isMpv() || opts.sync) mpvSet('mute', false); }
     if (isMpv() || opts.sync) mpvSet('volume', Math.round(val * 100));
     updateMuteIcon();
-    lsSet('zephyr-volume', String(val));
-    if (!opts.silent) showOSD('Volume ' + Math.round(val * 100) + '%' + (val > 1 && !isMpv() ? ' (boost needs mpv)' : ''), 900);
+    if (pref('rememberVolume', true)) lsSet('zephyr-volume', String(val));
+    if (!opts.silent) showOSD('Volume ' + Math.round(val * 100) + '%' + (val > 1 && !isMpv() && !(mpvReady && playlist[currentIndex] && playlist[currentIndex].path) ? ' (extra volume needs mpv)' : ''), 900);
+    // The browser engine cannot go above 100%: hand over to mpv (same position) the moment boost is requested.
+    const it = playlist[currentIndex];
+    if (val > 1.001 && !isMpv() && it && it.path && mpvReady && !it._boostSwitched && video.getAttribute('src') && !opts.noSwitch) {
+      it._boostSwitched = true; it.forceMpv = true;
+      showOSD('Extra volume: switching to mpv…', 1800);
+      playIndex(currentIndex, { startPos: curTime(), noHistory: true });
+    }
+  }
+  function applyVolumeLimits() {
+    volumeSlider.max = String(volumeMax);
+    volumeSlider.title = 'Volume (up to ' + Math.round(volumeMax * 100) + '%)';
+    if (volumeLevel > volumeMax) setVolume(volumeMax, { silent: true, noSwitch: true });
   }
   function toggleMute() {
     userMuted = !userMuted;
@@ -1199,8 +1230,7 @@
     if (fallbackToMpv('Browser engine can\'t play this')) return;
     showPlayError(mpvReady ? 'Cannot play this file' : 'Cannot play this file — place mpv.exe next to the app for full format support');
   });
-  video.addEventListener('click', togglePlay);
-  video.addEventListener('dblclick', toggleFullscreen);
+  // click / double-click / wheel / mouse buttons are configurable and live in controls.js
 
   playPauseBtn.addEventListener('click', togglePlay);
   bigPlay.addEventListener('click', () => {
@@ -1295,7 +1325,7 @@
   repeatBtn.addEventListener('click', cycleRepeat);
   themeToggle.addEventListener('click', toggleTheme);
   alwaysOnTopBtn.addEventListener('click', toggleAlwaysOnTop);
-  settingsBtn.addEventListener('click', openSettings);
+  settingsBtn.addEventListener('click', () => { if (window.ZApp && window.ZApp.openSettings) window.ZApp.openSettings(); else openSettings(); });
   if (closeSettings) {
     closeSettings.addEventListener('click', (e) => {
       e.preventDefault();
@@ -1329,6 +1359,7 @@
     return tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || (t && t.isContentEditable);
   }
   document.addEventListener('keydown', e => {
+    if (window.ZApp && window.ZApp.handlesKeys) return;      // controls.js owns every shortcut now
     if (typingTarget(e.target) || e.altKey) return;
     const hk = (typeof hotkeys === 'object' && hotkeys) || { play: ' ', full: 'f', mute: 'm', shot: 's', book: 'b' };
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
@@ -1363,7 +1394,8 @@
 
   // Init
 
-  { const sv = parseFloat(lsGet('zephyr-volume')); setVolume(isFinite(sv) ? sv : 1, { silent: true }); }
+  applyVolumeLimits();
+  { const sv = pref('rememberVolume', true) ? parseFloat(lsGet('zephyr-volume')) : NaN; setVolume(isFinite(sv) ? sv : pref('startVolume', 100) / 100, { silent: true, noSwitch: true }); }
   shuffle = lsGet('zephyr-shuffle') === '1';
   repeatMode = parseInt(lsGet('zephyr-repeat') || '0', 10) || 0;
   paintShuffle(); paintRepeat(); updateMuteIcon();
@@ -1699,6 +1731,7 @@
 
   // Keyboard frame step
   document.addEventListener('keydown', (e) => {
+    if (window.ZApp && window.ZApp.handlesKeys) return;
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
     if (e.key === ',') { e.preventDefault(); frameBackBtn && frameBackBtn.click(); }
     if (e.key === '.') { e.preventDefault(); frameFwdBtn && frameFwdBtn.click(); }
@@ -1869,6 +1902,7 @@
 
   // Shift+G / Shift+F style delay adjust (common in players)
   document.addEventListener('keydown', (e) => {
+    if (window.ZApp && window.ZApp.handlesKeys) return;
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
     if (e.key === 'z' || e.key === 'Z') {
       if (!subDelayEl) return;
@@ -2264,6 +2298,7 @@
       if (key === 'prev' && prevBtn) prevBtn.click();
       if (key === 'stop') stopAll();
       if (key === 'fullscreen') toggleFullscreen();
+      if (key === 'bookmark') { const b = document.getElementById('addBookmarkBtn'); if (b) b.click(); }
     });
   }
 
@@ -2277,6 +2312,7 @@
   }
 
   document.addEventListener('keydown', (e) => {
+    if (window.ZApp && window.ZApp.handlesKeys) return;
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
     // Ctrl+Shift+M mini
     if (e.ctrlKey && e.shiftKey && (e.key === 'M' || e.key === 'm')) {
@@ -3597,6 +3633,35 @@ if (pasteUrlBtn && urlInput) {
       get mpvReady() { return mpvReady; },
       get ab() { return abLoop; },
       get duration() { return curDur(); },
+      get volume() { return volumeLevel; },
+      get volumeStep() { return volumeStep; },
+      get seekStep() { return seekStep; },
+      get seekStepBig() { return seekStepBig; },
+      get speed() { return speedRate; },
+      toggleMute, takeScreenshot, handleABLoop, cycleRepeat, toggleShuffle, openFilesNative, applyVolumeLimits, pausePlayback, resumePlayback, isPlaying,
+      setPref(name, value) {
+        switch (name) {
+          case 'seekStep': seekStep = Number(value) || 10; break;
+          case 'seekStepBig': seekStepBig = Number(value) || 30; break;
+          case 'autoNext': autoNext = !!value; break;
+          case 'rememberPos': rememberPos = !!value; break;
+          case 'skipBad': skipBad = !!value; break;
+          case 'volumeMax': volumeMax = (Number(value) || 100) / 100; applyVolumeLimits(); break;
+          case 'volumeStep': volumeStep = (Number(value) || 5) / 100; break;
+          default: break;
+        }
+      },
+      engineCfg() {
+        return {
+          volumeMax: Math.round(volumeMax * 100), cacheMb: pref('cacheMb', 200), hrSeek: pref('hrSeek', true), compat: pref('compat', 0),
+          slang: pref('subAuto', true) ? pref('slang', 'en,eng') : '', alang: pref('alang', ''), extra: pref('mpvExtra', ''),
+          audio: { limiter: pref('softLimiter', true), normalize: pref('normalize', false), night: pref('nightMode', false) },
+          streamReload: pref('streamReload', true),
+          steps: { volume: Math.round(volumeStep * 100), seek: seekStep },
+          mouse: { wheel: pref('wheel', 'volume'), wheelShift: pref('wheelShift', 'seek'), wheelCtrl: pref('wheelCtrl', 'speed'), click: pref('click', 'playpause'),
+            dblclick: pref('dblclick', 'fullscreen'), middleClick: pref('middleClick', 'mute'), mouseBack: pref('mouseBack', 'prev'), mouseForward: pref('mouseForward', 'next') }
+        };
+      },
       get time() { return curTime(); },
       get seeking() { return isSeeking; },
       isMpv, showOSD, playIndex, seekTo, seekRelative, step, togglePlay, stopAll, setSpeed, setVolume, toggleFullscreen,

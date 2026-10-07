@@ -57,3 +57,28 @@ const fakeFetch = async (url) => {
   const hex = accentFromBitmap(px, true); console.log('accent', hex); assert(parseInt(hex.slice(1, 3), 16) > 180 && parseInt(hex.slice(5, 7), 16) < 90);
   console.log('online-meta OK');
 })().catch(e => { console.error(e); process.exit(1); });
+
+// ---- nodeFetch fallback (Electron 22 / Node 16 has no fetch): real local server, redirects, size cap, abort, errors
+(async () => {
+  const http = require('http'); const { nodeFetch } = require(H.ROOT + '/online-meta.js'); const assert = require('assert');
+  const srv = http.createServer((req, res) => {
+    if (req.url === '/json') { res.setHeader('content-type', 'application/json'); res.end('{"a":1}'); }
+    else if (req.url === '/redir') { res.statusCode = 302; res.setHeader('location', '/json'); res.end(); }
+    else if (req.url === '/loop') { res.statusCode = 302; res.setHeader('location', '/loop'); res.end(); }
+    else if (req.url === '/img') { res.setHeader('content-type', 'image/jpeg'); res.end(Buffer.alloc(3000, 1)); }
+    else if (req.url === '/slow') { setTimeout(() => res.end('late'), 3000); }
+    else { res.statusCode = 404; res.end('no'); }
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r)); const base = 'http://127.0.0.1:' + srv.address().port;
+  let r = await nodeFetch(base + '/json'); assert(r.ok && (await r.json()).a === 1 && r.headers.get('Content-Type') === 'application/json');
+  r = await nodeFetch(base + '/redir'); assert(r.ok && (await r.json()).a === 1, 'follows redirects');
+  r = await nodeFetch(base + '/img'); assert(r.headers.get('content-type') === 'image/jpeg' && Buffer.from(await r.arrayBuffer()).length === 3000);
+  assert.strictEqual((await nodeFetch(base + '/missing')).ok, false);
+  assert.strictEqual((await nodeFetch(base + '/loop')).ok, false, 'redirect loops end after 5 hops instead of spinning');
+  const ctl = new AbortController(); const p = nodeFetch(base + '/slow', { signal: ctl.signal }); setTimeout(() => ctl.abort(), 150); await assert.rejects(p, /abort/);
+  await assert.rejects(() => nodeFetch('not a url'), undefined); await assert.rejects(() => nodeFetch('http://127.0.0.1:1/x'));
+  // and OnlineMeta uses it by itself when no fetch is injected and none is global
+  const saved = global.fetch; delete global.fetch; const { OnlineMeta } = require(H.ROOT + '/online-meta.js'); const om = new OnlineMeta({ spacingMs: 1 }); global.fetch = saved;
+  assert.strictEqual(typeof om.fetch, 'function'); const got = await om._get(base + '/json'); assert.strictEqual(got.a, 1);
+  srv.close(); console.log('nodeFetch fallback OK');
+})().catch((e) => { console.error(e); process.exit(1); });

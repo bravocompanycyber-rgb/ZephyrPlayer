@@ -100,4 +100,33 @@ function buildDiagnostics(d) {
   return L.join('\n');
 }
 
-module.exports = { buildClipArgs, exportClip, findPrevKeyframe, clipName, getVersion, buildDiagnostics };
+/* ---- codec support report (from the ffmpeg build) ---- */
+const CODEC_LIST = {
+  video: [['h264', 'H.264 / AVC'], ['hevc', 'HEVC / H.265 / x265'], ['av1', 'AV1'], ['vp9', 'VP9'], ['vp8', 'VP8'], ['mpeg2video', 'MPEG-2 (DVD, TV)'], ['mpeg4', 'MPEG-4 / DivX / Xvid'],
+    ['vc1', 'VC-1 (Blu-ray)'], ['wmv3', 'Windows Media Video'], ['prores', 'Apple ProRes'], ['dnxhd', 'DNxHD / DNxHR'], ['theora', 'Theora'], ['mjpeg', 'Motion JPEG'], ['rv40', 'RealVideo'], ['flv', 'Flash Video'], ['cfhd', 'CineForm'], ['ffv1', 'FFV1'], ['hap', 'HAP']],
+  audio: [['aac', 'AAC'], ['mp3', 'MP3'], ['ac3', 'Dolby Digital (AC-3)'], ['eac3', 'Dolby Digital Plus'], ['truehd', 'Dolby TrueHD'], ['dts', 'DTS / DTS-HD'], ['flac', 'FLAC'], ['opus', 'Opus'], ['vorbis', 'Vorbis'],
+    ['alac', 'Apple Lossless'], ['wmav2', 'Windows Media Audio'], ['wavpack', 'WavPack'], ['ape', "Monkey's Audio"], ['pcm_s16le', 'PCM / WAV'], ['amr_nb', 'AMR'], ['cook', 'RealAudio']],
+  subtitles: [['subrip', 'SubRip (.srt)'], ['ass', 'ASS / SSA'], ['webvtt', 'WebVTT'], ['dvd_subtitle', 'DVD subtitles'], ['hdmv_pgs_subtitle', 'Blu-ray PGS subtitles'], ['mov_text', 'MP4 text']]
+};
+function parseDecoders(text) {
+  const names = new Set();
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const m = /^\s([VAS][A-Z.]{5})\s+(\S+)\s/.exec(line);
+    if (m) names.add(m[2]);
+  }
+  return names;
+}
+async function codecReport(ffmpegPath) {
+  if (!ffmpegPath) return { ok: false, error: 'ffmpeg not found' };
+  const run = (args) => new Promise((resolve) => execFile(ffmpegPath, args, { timeout: 15000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, so, se) => resolve(String(so || '') + '\n' + String(se || ''))));
+  const dec = parseDecoders(await run(['-hide_banner', '-decoders']));
+  if (!dec.size) return { ok: false, error: 'Could not read the decoder list' };
+  const hw = String(await run(['-hide_banner', '-hwaccels'])).split(/\r?\n/).map((l) => l.trim()).filter((l) => /^[a-z0-9_]+$/.test(l) && l !== 'Hardware');
+  const section = (list) => list.map(([id, name]) => ({ id, name, ok: dec.has(id) }));
+  const rep = { ok: true, total: dec.size, video: section(CODEC_LIST.video), audio: section(CODEC_LIST.audio), subtitles: section(CODEC_LIST.subtitles), hwaccels: hw };
+  rep.supported = rep.video.concat(rep.audio, rep.subtitles).filter((c) => c.ok).length;
+  rep.listed = rep.video.length + rep.audio.length + rep.subtitles.length;
+  return rep;
+}
+
+module.exports = { codecReport, parseDecoders, CODEC_LIST, buildClipArgs, exportClip, findPrevKeyframe, clipName, getVersion, buildDiagnostics };

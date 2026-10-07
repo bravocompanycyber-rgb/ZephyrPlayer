@@ -63,6 +63,76 @@ Auto-loads `.srt .vtt .ass .ssa` files next to the video (also non-UTF-8 files),
 Load more by dropping a subtitle file. **Generate subtitles with AI** (whisper, runs on your PC; installed by `setup-tools.bat`) from the subtitle menu.
 Delay, size and style are adjustable live.
 
+## 5b. Settings (Basic to Advanced, with explanations)
+
+Open the gear (or press **Ctrl+,**). Settings are grouped: **General, Playback, Audio & volume, Video & performance, Subtitles, Keys & mouse,
+Library & online, File types & players, Advanced**. The Advanced section and the advanced options inside each group stay hidden until you
+turn on **Show advanced settings**; the defaults are already good, so most people never need them.
+
+* **Hover any setting** (or its "i") for a short explanation of what it does.
+* **Reset**: the ↺ next to a setting resets that one; **Reset this section** resets a group; **Advanced > Reset ALL settings** resets everything
+  (your playlist, history and files are not touched). A badge shows how many settings in each group differ from the default.
+* **Search** finds any setting by word ("volume", "subtitle", "fullscreen").
+* **Export / Import** a settings file to back up or move to another PC. Invalid or unknown entries are ignored safely.
+* Settings are validated and saved immediately; a damaged settings file is backed up and replaced by defaults instead of breaking the app.
+
+## 5c. Volume and extra volume
+
+* Volume goes **up to 300%** (default maximum 200%; change it under Audio & volume). Mouse wheel and arrow keys change it by a step you choose.
+* Above 100% the **soft limiter** (on by default) stops peaks from crackling. **Even out loudness** makes quiet and loud videos similar;
+  **Night mode** softens explosions and lifts whispers.
+* The browser engine cannot exceed 100%, so asking for more volume hands the file to **mpv** automatically at the same position.
+
+## 5d. Keys and mouse
+
+Settings > **Keys & mouse**:
+
+* **Every keyboard shortcut is rebindable**: click **+** on an action, press the new key. An action can have several keys; if a key is already used,
+  it moves to the new action and you are told. ↺ restores a default; **Reset all shortcuts** restores all.
+* **Mouse wheel** (plain, Shift, Ctrl): volume, skip, speed, previous/next item or nothing.
+* **Click, double-click, middle button, and the two thumb buttons** (Back/Forward on many mice): play/pause, fullscreen, mute, screenshot,
+  next/previous, skip, A-B loop, bookmark, playlist, mini player, or nothing.
+* These also apply **inside the mpv window**. Esc is reserved for leaving fullscreen and closing panels.
+
+## 5e. Reliability: it should not hang or crash
+
+* **Frozen player**: if mpv stops responding for about 10 seconds, it is force-closed and restarted at the same position.
+* **Won't open**: a file or link that does not open within 75 seconds is reported (and skipped if you chose that) instead of hanging.
+* **Stalled streams** reconnect from the same spot (up to 3 times). **Bad files** are skipped. **A typo in your own mpv options** falls back to safe mode and still plays.
+* **No picture / too heavy / crash**: automatic fallbacks (see section 2). If both engines fail, ZephyrPlayer offers VLC, MPC-HC or another installed player.
+
+## 5f. Every codec, K-Lite, other players
+
+* ZephyrPlayer plays through **mpv and FFmpeg**, which already decode almost every format K-Lite does (HEVC/x265, AV1, VP9, ProRes, MPEG-2, VC-1, AC-3, DTS, TrueHD,
+  FLAC, WMA, RealVideo and many more) plus ASS/PGS subtitles. **Tools & health > Show codec support** lists exactly what your install can decode.
+* **K-Lite works through DirectShow filters**, which only DirectShow players (like K-Lite's MPC-HC) can use, so mpv cannot load them. You do not need K-Lite to play files here.
+  If a rare file still will not play, ZephyrPlayer finds **MPC-HC (including the K-Lite one), MPC-BE, VLC, PotPlayer, KMPlayer** and offers to open the file there
+  (Settings > File types & players: ask / open automatically / do nothing).
+* **Disc images and DVD/Blu-ray menus are not supported yet.**
+
+## 5g. File associations
+
+Settings > **File types & players**: pick Video / Audio / Playlists and press **Register ZephyrPlayer**. This adds the app to **Open with** and to the
+Windows **Default apps** list without needing administrator rights, then opens that Windows page so you can pick it (Windows does not let any app set itself as default silently).
+Opening a `.m3u`, `.m3u8` or `.pls` file loads it as a playlist, including links. **Remove registration** undoes everything.
+Installers built with `editions/build-edition.bat` also register all these types during installation.
+
+## 5h. Two editions: Modern and Legacy (Windows 8.1)
+
+| | Modern | Legacy |
+|---|---|---|
+| Windows | 10 / 11 | 7 / 8 / 8.1 (also runs on 10 / 11) |
+| Runtime | your current Electron | **Electron 22.3.27** (the last release that supports Windows 7/8/8.1) |
+| JavaScript runtime for YouTube | Deno | QuickJS (Deno needs Windows 10) |
+| Tool installer | PowerShell 5+ | works with PowerShell 4 (Windows 8.1) |
+
+Build either with `editions\build-edition.bat modern` or `editions\build-edition.bat legacy` (details in `editions/README.md`). The app shows which edition is
+running in Tools & health. `setup-tools.bat` picks the right tools for your Windows automatically (`-Edition legacy` to force).
+
+**Honest limits of the legacy edition:** the app's own code is tested on the Node and Chromium versions inside Electron 22, but the third-party tools (mpv, yt-dlp,
+FFmpeg, whisper) are downloaded from their official sites and their support for Windows 8.1 is decided by their authors and can change. The **self-test tells you
+on your machine** which ones work. Where a tool does not run, the built-in browser engine still plays common formats and the other-player hand-over covers the rest.
+
 ## 6. Posters and info from the internet (optional)
 
 Settings > **Fetch posters, covers & info**. Off by default.
@@ -93,7 +163,7 @@ Every icon is a file in `assets/icons/`. Save your own with the same name (for e
 `assets/icons/README.md` lists all names and where to download free sets; open `icon-sheet.html` to see them.
 `File > Open icons folder` jumps there.
 
-## 9. Keyboard shortcuts (press `?` in the app)
+## 9. Keyboard shortcuts (press `?` in the app; all are rebindable, see 5d)
 
 | Key | Action | Key | Action |
 |---|---|---|---|
@@ -106,6 +176,9 @@ Every icon is a file in `assets/icons/`. Save your own with the same name (for e
 | . / , | Frame step | B | Bookmark |
 | Home / End | Start / end | M | Mute |
 | Ctrl+O | Open files | R | Repeat mode |
+| Ctrl+, | Settings | Ctrl+H | Shuffle |
+| Ctrl+U | Open a link | Ctrl+T | Always on top |
+| Z / X | Subtitles earlier / later | V | Subtitles on / off |
 | Shift+I | Stats (mpv) | ? | Shortcut list |
 
 Media keys on the keyboard also work. Screenshots go to `Pictures\ZephyrPlayer`.
@@ -148,8 +221,9 @@ Online lookups are tested against fixtures shaped like each service's documented
 
 If `package.json` has a `build.files` list, include `*.js`, `js/**`, `css/**`, `assets/**`, `splash.html`, `index.html`, `setup-tools.ps1`, `README.md`, `TOOLS.md`.
 
-Layout: `main.js` (windows, IPC) | `mpv-session.js` + `mpv-ipc.js` (mpv control, recovery) | `media-probe.js` (file info, posters) |
-`online-meta.js` (optional internet info) | `media-tools.js` (clips, diagnostics) | `js/player.js` (player core) | `js/features.js` (themes, fullscreen UI, panels).
+Layout: `main.js` (windows, IPC) | `mpv-session.js` + `mpv-ipc.js` (mpv control, recovery, hang protection) | `engine-config.js` (validated engine settings, audio chain) | `media-probe.js` (file info, posters) |
+`external-players.js` + `file-assoc.js` + `edition.js` (other players, Windows associations, edition detection) | `js/settings-store.js` + `js/settings-ui.js` + `js/controls.js` (settings, shortcuts, mouse) |
+`online-meta.js` (optional internet info) | `media-tools.js` (clips, diagnostics, codec report) | `js/player.js` (player core) | `js/features.js` (themes, fullscreen UI, panels).
 
 ## 14. Credits and licences
 

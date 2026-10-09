@@ -1,6 +1,6 @@
 {
   "name": "zephyrplayer",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "ZephyrPlayer — local desktop media player (no accounts, no required APIs)",
   "main": "main.js",
   "author": {
@@ -31,9 +31,13 @@
       "**/*.{exe,dll,node}",
       "ffmpeg/**/*",
       "mpv.exe",
+      "mpv.com",
       "vulkan-1.dll",
+      "d3dcompiler_43.dll",
       "whisper-cli.exe",
       "yt-dlp.exe",
+      "deno.exe",
+      "qjs.exe",
       "ggml*.dll",
       "whisper.dll"
     ],
@@ -41,23 +45,41 @@
       "main.js",
       "preload.js",
       "index.html",
+      "splash.html",
       "package.json",
       "mpv-controller.js",
+      "mpv-session.js",
+      "mpv-ipc.js",
+      "engine-config.js",
+      "external-players.js",
+      "file-assoc.js",
+      "edition.js",
+      "media-probe.js",
+      "media-tools.js",
+      "media-utils.js",
+      "online-meta.js",
       "css/**/*",
       "js/**/*",
       "assets/**/*",
       "shaders/**/*",
       "ffmpeg/**/*",
       "mpv.exe",
+      "mpv.com",
       "vulkan-1.dll",
+      "d3dcompiler_43.dll",
       "whisper-cli.exe",
       "yt-dlp.exe",
+      "deno.exe",
+      "qjs.exe",
       "ggml-base.dll",
       "ggml-cpu-x64.dll",
       "ggml.dll",
       "whisper.dll",
       "LICENSE.txt",
-      "THIRD_PARTY_NOTICES.txt"
+      "THIRD_PARTY_NOTICES.txt",
+      "THIRD_PARTY_NOTICES.additions.txt",
+      "README.md",
+      "TOOLS.md"
     ],
     "extraResources": [
       {
@@ -97,7 +119,10 @@
       "artifactName": "ZephyrPlayer-${version}-Windows10+-Setup.${ext}",
       "deleteAppDataOnUninstall": false,
       "runAfterFinish": true,
-      "menuCategory": "Multimedia"
+      "menuCategory": "Multimedia",
+      "include": null,
+      "differentialPackage": true,
+      "warningsAsErrors": false
     },
     "portable": {
       "artifactName": "ZephyrPlayer-${version}-Windows10+-Portable.${ext}"

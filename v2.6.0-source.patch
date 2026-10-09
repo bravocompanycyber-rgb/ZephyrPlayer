@@ -1,0 +1,64 @@
+--- a/js/features.js
++++ b/js/features.js
+@@ -297,15 +297,17 @@
+     const r = el.getBoundingClientRect();
+     return FS.x >= r.left - pad && FS.x <= r.right + pad && FS.y >= r.top - pad && FS.y <= r.bottom + pad;
+   }
+-  const uiBusy = () => !!document.querySelector('.popup-menu:not([hidden]), .settings-panel:not([hidden])') || A.seeking;
++  const uiBusy = () => !!document.querySelector('.popup-menu:not([hidden]), .settings-panel:not([hidden]), #plCtxMenu:not([hidden])') || A.seeking;
+ 
+   function evaluate() {
+     if (!inFs()) return;
+     const now = Date.now();
+     const w = window.innerWidth, h = window.innerHeight;
+     const busy = uiBusy();
++    // Show seek bar/controls on any recent mouse movement (~2.2s), or when near the bottom edge
++    const recentlyMoved = (now - FS.last) < 2200 && FS.last > 0;
+     const want = {
+-      bottom: busy || FS.y > h - 150 || over($('controls'), 8),
++      bottom: busy || recentlyMoved || FS.y > h - 150 || over($('controls'), 8),
+       top: FS.y >= 0 && FS.y < 90 || over(document.querySelector('.top-bar'), 8),
+       side: FS.pinSide || FS.x > w - 28 || over($('sidebar'), 8)
+     };
+--- a/css/style.css
++++ b/css/style.css
+@@ -336,6 +336,10 @@
+ .playlist-item.dragging{opacity:.4}
+ .playlist-item.drop-before{box-shadow:inset 0 3px 0 var(--accent)}
+ .playlist-item.drop-after{box-shadow:inset 0 -3px 0 var(--accent)}
++.playlist-item.selected{background:var(--accent-soft);outline:1px solid var(--accent)}
++.playlist-item.selected .name{color:var(--accent)}
++.popup-menu button.danger{color:var(--danger)}
++.popup-menu button.danger:hover{background:rgba(220,50,50,.15);color:var(--danger)}
+ .sidebar-footer{font-variant-numeric:tabular-nums}
+ 
+ 
+--- a/index.html
++++ b/index.html
+@@ -580,6 +580,28 @@
+     <button data-ctx="bookmark">Add bookmark</button>
+   </div>
+ 
++  <!-- Playlist item context menu (right-click on a row, works in fullscreen too) -->
++  <div class="popup-menu" id="plCtxMenu" hidden>
++    <button data-plctx="play">Play</button>
++    <button data-plctx="play-next">Play next</button>
++    <div class="menu-divider"></div>
++    <button data-plctx="select">Select / deselect</button>
++    <button data-plctx="select-all">Select all</button>
++    <button data-plctx="select-none">Clear selection</button>
++    <div class="menu-divider"></div>
++    <button data-plctx="reveal">Open file location</button>
++    <button data-plctx="copy-path">Copy path</button>
++    <button data-plctx="copy-name">Copy name</button>
++    <div class="menu-divider"></div>
++    <button data-plctx="remove">Remove from playlist</button>
++    <button data-plctx="remove-selected">Remove selected</button>
++    <button data-plctx="delete-file" class="danger">Delete file from disk…</button>
++    <div class="menu-divider"></div>
++    <button data-plctx="similar">Play similar (same folder)</button>
++    <button data-plctx="probe">Re-scan duration / info</button>
++    <button data-plctx="info">Media info</button>
++  </div>
++
+   <!-- Subtitle browser / AI panel -->

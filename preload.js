@@ -65,6 +65,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onlineClearCache: () => invoke('online:clearCache'),
   exportClip: (o) => invoke('media:exportClip', o),
   showItem: (f) => invoke('shell:showItem', f),
+  deleteFile: (f) => invoke('files:delete', f),
   toolsStatus: () => invoke('tools:status'),
   toolsInstall: (opts) => invoke('tools:install', opts),
   collectDiagnostics: () => invoke('diag:collect'),

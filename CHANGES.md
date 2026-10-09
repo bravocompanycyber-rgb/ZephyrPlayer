@@ -1,3 +1,13 @@
+# ZephyrPlayer upgrade v6
+
+## v6 (2.6.0): packaging fix, playlist context menu, fullscreen, selection totals
+- **Critical packaging fix**: `package.json` `build.files` and `asarUnpack` now include every root module the app needs (`mpv-session.js`, `mpv-ipc.js`, `engine-config.js`, `media-probe.js`, `media-tools.js`, `media-utils.js`, `online-meta.js`, `external-players.js`, `file-assoc.js`, `edition.js`, `splash.html`, tools, notices). This fixes the install crash `Cannot find module './mpv-session'`.
+- **Playlist right-click menu** (works in fullscreen): Play, Play next, Select / Select all / Clear, Open file location, Copy path / name, Remove / Remove selected, Delete file from disk (confirmed), Play similar (same folder), Re-scan duration, Media info.
+- **Multi-select**: Ctrl+click toggle, Shift+click range. Footer shows selected count and total runtime (e.g. `3 selected (45 min)`).
+- **Fullscreen seek bar**: controls appear on any mouse movement for ~2.2s (not only when near the bottom edge). Playlist context menu keeps UI visible while open.
+- **Delete from disk**: safe `files:delete` IPC (absolute path, file-only, confirmed in UI).
+- Version **2.6.0**. Rebuild installer required for packaging fix.
+
 # ZephyrPlayer upgrade v5
 
 ## v5: settings, controls, volume, robustness, editions

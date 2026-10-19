@@ -8,12 +8,11 @@ const {
   Tray,
   nativeImage,
   globalShortcut,
-  screen,
-  net,
-  clipboard
+  screen
 } = require('electron');
 
 const path = require('path');
+const net = require('net');
 const fs = require('fs');
 const { spawn, execSync, execFile } = require('child_process');
 
@@ -28,13 +27,6 @@ try {
 const { MpvController } = require('./mpv-controller');
 const { MpvSession } = require('./mpv-session');
 const mediaUtils = require('./media-utils');
-const { MediaProbe } = require('./media-probe');
-const { OnlineMeta, accentFromBitmap } = require('./online-meta');
-const mediaTools = require('./media-tools');
-const externalPlayers = require('./external-players');
-const fileAssoc = require('./file-assoc');
-const { detectEdition } = require('./edition');
-const { cleanCfg, parseUserMpvOptions, composeAudioFilter } = require('./engine-config');
 const os = require('os');
 
 /* -------------------------------------------------------------------------- */
@@ -153,17 +145,10 @@ function saveRecentFiles() {
   } catch {}
 }
 
-// Windows can deny "Recent" jump-list categories ("Show recently opened items" is off). Chromium prints an error
-// every attempt, so after the first denial we remember it and never ask again.
-function jumpListFlag() { return path.join(app.getPath('userData'), 'jumplist-denied'); }
-let jumpListDenied = null;
-
 function updateJumpList() {
   if (process.platform !== 'win32') return;
-  if (jumpListDenied === null) jumpListDenied = fileExists(jumpListFlag());
-  if (jumpListDenied) return;
   try {
-    const result = app.setJumpList([
+    app.setJumpList([
       {
         type: 'custom',
         name: 'Recent Media',
@@ -178,11 +163,6 @@ function updateJumpList() {
         }))
       }
     ]);
-    if (result === 'customCategoryAccessDeniedError') {
-      jumpListDenied = true;
-      try { fs.writeFileSync(jumpListFlag(), '1'); } catch {}
-      log('Jump list disabled: Windows privacy settings block recent items (harmless).');
-    }
   } catch (e) {
     log('setJumpList failed (privacy settings?):', e.message);
   }
@@ -356,111 +336,6 @@ function findFfmpeg() {
     (onPath('ffmpeg') ? 'ffmpeg' : null));
 }
 
-function findFfprobe() {
-  return cachedTool('ffprobe', () =>
-    firstExisting(['ffprobe.exe', 'ffprobe'], [...toolDirs('ffmpeg'), ...toolDirs('ffmpeg', 'bin'), ...toolDirs()]) ||
-    (onPath('ffprobe') ? 'ffprobe' : null));
-}
-
-let probeSvc = null;
-function getProbe() {
-  if (!probeSvc) {
-    probeSvc = new MediaProbe({
-      cacheFile: path.join(app.getPath('userData'), 'probe-cache.json'),
-      thumbDir: path.join(app.getPath('userData'), 'thumbs'),
-      log, concurrency: 3
-    });
-  }
-  probeSvc.setTools({ ffprobePath: findFfprobe(), ffmpegPath: findFfmpeg(), mpvPath: findMpv() });
-  return probeSvc;
-}
-
-// YouTube extraction now needs a JavaScript runtime for yt-dlp (https://github.com/yt-dlp/yt-dlp/wiki/EJS).
-// Prefer deno.exe next to the app (free), otherwise reuse this app's own Electron binary as a Node runtime.
-let editionCache = null;
-function getEdition() {
-  if (!editionCache) editionCache = detectEdition({ platform: process.platform, osRelease: os.release(), electron: process.versions.electron, node: process.versions.node });
-  return editionCache;
-}
-
-function findJsRuntime() {
-  return cachedTool('jsruntime', () => {
-    const ed = getEdition();
-    const deno = firstExisting(['deno.exe', 'deno'], toolDirs());
-    const qjs = firstExisting(['qjs.exe', 'quickjs.exe', 'qjs'], toolDirs());
-    const pick = (kind, file) => ({ kind, value: kind + ':' + file.replace(/\\/g, '/'), env: null });
-    if (ed.preferQuickJs) {                                    // Windows 7 / 8 / 8.1 and the legacy build
-      if (qjs) return pick('quickjs', qjs);
-      if (deno) return pick('deno', deno);
-    } else {
-      if (deno) return pick('deno', deno);
-      if (qjs) return pick('quickjs', qjs);
-      if (onPath('deno')) return { kind: 'deno (PATH)', value: null, env: null };   // deno is yt-dlp's default
-    }
-    if (ed.canUseElectronAsNode) return { kind: 'electron-node', value: 'node:' + process.execPath.replace(/\\/g, '/'), env: { ELECTRON_RUN_AS_NODE: '1' } };
-    return { kind: 'none', value: null, env: null };
-  });
-}
-
-const COOKIE_BROWSERS = new Set(['chrome', 'edge', 'firefox', 'brave', 'opera', 'vivaldi', 'chromium']);
-function ytdlArgsFor(cookies) {
-  const rt = findJsRuntime();
-  const args = ['--no-playlist'];
-  if (rt && rt.value) args.push('--js-runtimes', rt.value);
-  if (COOKIE_BROWSERS.has(cookies)) args.push('--cookies-from-browser', cookies);
-  return { args, env: Object.assign({}, process.env, (rt && rt.env) || {}) };
-}
-
-function friendlyYtdlError(text) {
-  const t = String(text || '');
-  if (/sign in to confirm|not a bot|confirm you.?re not/i.test(t)) return 'YouTube wants you signed in. Open the link panel and pick your browser under "Use cookies from", then try again.';
-  if (/javascript runtime|jsc|EJS/i.test(t)) return 'YouTube needs a JavaScript runtime. Put the free deno.exe (deno.com) next to ZephyrPlayer, then File ▸ Update yt-dlp.';
-  if (/HTTP Error 403|nsig|SABR|unable to extract|Requested format is not available/i.test(t)) return 'yt-dlp is out of date for current YouTube. Use File ▸ Update yt-dlp, then retry.';
-  if (/private|unavailable|removed|members-only|age/i.test(t)) return (t.split(/\r?\n/).reverse().find((l) => /ERROR/.test(l)) || t).replace(/^.*ERROR:\s*/, '').slice(0, 200);
-  if (/Unsupported URL/i.test(t)) return 'This link is not supported by yt-dlp. If it is a direct video/stream URL, check that it is still valid.';
-  const err = t.split(/\r?\n/).reverse().find((l) => /ERROR/.test(l));
-  return (err ? err.replace(/^.*ERROR:\s*/, '') : t).trim().slice(0, 220) || 'Could not open this link';
-}
-
-function diagnoseUrl(url, cookies) {
-  const ytdlp = findYtDlp();
-  if (!ytdlp) return Promise.resolve('yt-dlp.exe was not found next to the app, so links cannot be resolved.');
-  const { args, env } = ytdlArgsFor(cookies);
-  return new Promise((resolve) => {
-    try {
-      execFile(ytdlp, [...args, '-g', '--', url], { timeout: 45000, windowsHide: true, env, maxBuffer: 4 * 1024 * 1024 },
-        (err, stdout, stderr) => {
-          if (!err && String(stdout).trim()) resolve('The link resolves, but mpv could not play it (' + String(stdout).trim().split(/\r?\n/)[0].slice(0, 60) + '…). Try a different quality or File ▸ Update yt-dlp.');
-          else resolve(friendlyYtdlError(String(stderr || '') + '\n' + (err ? err.message : '')));
-        });
-    } catch (e) { resolve(e.message); }
-  });
-}
-
-function ytdlpStampPath() { return path.join(app.getPath('userData'), 'ytdlp-update.json'); }
-
-function updateYtDlp() {
-  const y = findYtDlp();
-  if (!y) return Promise.resolve({ ok: false, output: 'yt-dlp not found next to the app.' });
-  return new Promise((resolve) => {
-    execFile(y, ['-U'], { timeout: 180000, windowsHide: true }, (err, stdout, stderr) => {
-      toolCache.delete('yt-dlp');
-      try { fs.writeFileSync(ytdlpStampPath(), JSON.stringify({ at: Date.now() })); } catch {}
-      resolve({ ok: !err, output: (String(stdout) + String(stderr)).trim().slice(-700) || (err ? err.message : 'Done') });
-    });
-  });
-}
-
-// YouTube changes constantly; keep yt-dlp fresh without bothering the user (at most every 3 days, silent).
-function maybeAutoUpdateYtDlp() {
-  try {
-    let last = 0;
-    try { last = JSON.parse(fs.readFileSync(ytdlpStampPath(), 'utf8')).at || 0; } catch {}
-    if (Date.now() - last < 3 * 86400000) return;
-    updateYtDlp().then((r) => log('yt-dlp auto-update:', r.ok ? 'ok' : 'failed', r.output.split(/\r?\n/).pop()));
-  } catch (e) { log('auto-update check failed:', e.message); }
-}
-
 function ensureScreenshotDir() {
   try {
     const dir = path.join(app.getPath('pictures'), 'ZephyrPlayer');
@@ -469,95 +344,6 @@ function ensureScreenshotDir() {
   } catch {
     try { const d = path.join(app.getPath('userData'), 'screenshots'); fs.mkdirSync(d, { recursive: true }); return d; } catch { return null; }
   }
-}
-
-/* -------------------------------------------------------------------------- */
-/* Small main-process settings (things needed before the UI exists)           */
-/* -------------------------------------------------------------------------- */
-
-const SETTINGS_DEFAULTS = { splash: true };
-let settingsCache = null;
-function settingsFile() { return path.join(app.getPath('userData'), 'settings.json'); }
-function getSettings() {
-  if (settingsCache) return settingsCache;
-  let saved = {};
-  try { saved = JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) || {}; } catch {}
-  settingsCache = Object.assign({}, SETTINGS_DEFAULTS, saved);
-  return settingsCache;
-}
-function setSetting(key, value) {
-  if (!Object.prototype.hasOwnProperty.call(SETTINGS_DEFAULTS, key)) return false;
-  getSettings()[key] = value;
-  try { fs.writeFileSync(settingsFile(), JSON.stringify(settingsCache)); } catch (e) { log('settings save failed:', e.message); }
-  return true;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Splash screen                                                              */
-/* -------------------------------------------------------------------------- */
-
-let splashWin = null;
-let splashShownAt = 0;
-
-function showSplash() {
-  if (!getSettings().splash) return;
-  try {
-    splashWin = new BrowserWindow({
-      width: 460, height: 300, frame: false, resizable: false, movable: false, minimizable: false, maximizable: false,
-      transparent: true, show: false, alwaysOnTop: true, skipTaskbar: true, center: true, hasShadow: false,
-      backgroundColor: '#00000000', webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false }
-    });
-    splashWin.once('ready-to-show', () => {
-      if (!splashWin || splashWin.isDestroyed()) return;
-      splashShownAt = Date.now();
-      splashWin.show();
-      setSplashStatus('Looking for your tools…', app.getVersion());
-    });
-    splashWin.on('closed', () => { splashWin = null; });
-    splashWin.loadFile(path.join(__dirname, 'splash.html')).catch(() => closeSplash());
-  } catch (e) { log('splash failed:', e.message); splashWin = null; }
-}
-function setSplashStatus(text, version) {
-  try {
-    if (!splashWin || splashWin.isDestroyed()) return;
-    let js = 'window.setStatus && window.setStatus(' + JSON.stringify(String(text)) + ');';
-    if (version) js += 'window.setVersion && window.setVersion(' + JSON.stringify(String(version)) + ');';
-    splashWin.webContents.executeJavaScript(js).catch(() => {});
-  } catch {}
-}
-function closeSplash() {
-  try { if (splashWin && !splashWin.isDestroyed()) splashWin.close(); } catch {}
-  splashWin = null;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Online posters / info (optional, free, keyless)                            */
-/* -------------------------------------------------------------------------- */
-
-let onlineSvc = null;
-function getOnline() {
-  if (!onlineSvc) {
-    let fetchImpl = null;
-    try { if (net && typeof net.fetch === 'function') fetchImpl = net.fetch.bind(net); } catch {}
-    if (!fetchImpl && typeof fetch === 'function') fetchImpl = fetch;
-    onlineSvc = new OnlineMeta({
-      fetchImpl, log,
-      cacheFile: path.join(app.getPath('userData'), 'online-cache.json'),
-      posterDir: path.join(app.getPath('userData'), 'posters')
-    });
-  }
-  return onlineSvc;
-}
-
-function posterAccent(file) {
-  try {
-    const img = nativeImage.createFromPath(file);
-    if (img.isEmpty()) return null;
-    const small = img.resize({ width: 24, height: 24, quality: 'good' });
-    const { width, height } = small.getSize();
-    const bmp = small.toBitmap();
-    return width && height ? accentFromBitmap(bmp, true) : null;
-  } catch { return null; }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -660,28 +446,16 @@ function getSession() {
   session.on('started', (info) => safeSend('mpv-event', { type: 'started', level: info.level }));
   session.on('file-loaded', () => safeSend('mpv-event', { type: 'file-loaded' }));
   session.on('end-file', (info) => {
-    if (info.reason !== 'error') return;
-    const src = session && session.inputs && session.inputs[0];
-    if (src && mediaUtils.isUrl(src)) {
-      // find out WHY a link failed (outdated yt-dlp, no JS runtime, sign-in wall...) instead of a generic error
-      diagnoseUrl(src, session.opts && session.opts.cookies).then((msg) => safeSend('mpv-event', { type: 'file-error', error: msg, stream: true }));
-    } else {
-      safeSend('mpv-event', { type: 'file-error', error: info.error || 'Could not open this file' });
-    }
+    if (info.reason === 'error') safeSend('mpv-event', { type: 'file-error', error: info.error || 'Could not open this file' });
   });
-  session.on('perf', (info) => safeSend('mpv-event', { type: 'perf', stage: info.stage }));
   session.on('client-message', (args) => {
     if (args[0] === 'zephyr-fs') safeSend('hotkey', 'fullscreen');
-    else if (args[0] === 'zephyr-prev') safeSend('hotkey', 'prev');
-    else if (args[0] === 'zephyr-next') safeSend('hotkey', 'next');
-    else if (args[0] === 'zephyr-queue') safeSend('hotkey', 'queue');
-    else if (args[0] === 'zephyr-bookmark') safeSend('hotkey', 'bookmark');
   });
   session.on('closed', () => { hideEmbed(); safeSend('mpv-event', { type: 'closed' }); });
   session.on('stopped', () => hideEmbed());
   session.on('recovering', (info) => {
     log('mpv recovering, level', info.level, 'attempt', info.attempt);
-    safeSend('mpv-event', { type: 'recovering', level: info.level, attempt: info.attempt, reason: String(info.reason || '').slice(0, 120) });
+    safeSend('mpv-event', { type: 'recovering', level: info.level, attempt: info.attempt });
   });
   session.on('failed', (info) => {
     hideEmbed();
@@ -698,14 +472,6 @@ function normalizeInputs(inputs) {
   return [];
 }
 
-const audioState = { eq: {}, limiter: true, normalize: false, night: false };
-async function applyAudio() {
-  const s = session || getSession();
-  if (!s) return;
-  const af = composeAudioFilter(audioState);
-  if (af || s.live.has('af')) await s.setProp('af', af).catch((e) => log('af failed:', e.message));
-}
-
 async function startPlayback(opts = {}) {
   const inputs = normalizeInputs(opts.files);
   if (!inputs.length) return { ok: false, error: 'No media input' };
@@ -717,7 +483,7 @@ async function startPlayback(opts = {}) {
     if (!mediaUtils.isUrl(i) && !fileExists(i)) return { ok: false, error: 'File not found: ' + path.basename(i) };
   }
 
-  let mode = opts.embed === false ? 'off' : (embedMode === 'child' ? 'child' : 'off');
+  let mode = opts.embed === false ? 'off' : (embedMode || 'off');
   let wid = null;
   let syncGeometry = null;
 
@@ -746,20 +512,8 @@ async function startPlayback(opts = {}) {
     startPos: Number(opts.startPos) || 0,
     ytdlpPath: findYtDlp(), shaderDir: path.join(getAppPath(), 'shaders'),
     screenshotDir: ensureScreenshotDir(),
-    reuse: opts.reuse !== false, restart: !!opts.restart,
-    cookies: COOKIE_BROWSERS.has(opts.cookies) ? opts.cookies : null,
-    cfg: cleanCfg(opts.cfg)
+    reuse: opts.reuse !== false, restart: !!opts.restart
   };
-  {
-    const ex = parseUserMpvOptions(opts.cfg && opts.cfg.extra);
-    base.userExtra = ex.accepted;
-    if (ex.rejected.length) log('ignored mpv options:', ex.rejected.join(' | '));
-  }
-  if (inputs.some(mediaUtils.isUrl)) {
-    const rt = findJsRuntime();
-    base.jsRuntime = rt && rt.value;
-    base.env = rt && rt.env;
-  }
 
   let res = await s.play(inputs, Object.assign({}, base, { mode, wid, syncGeometry }));
   if (!res.ok && mode !== 'off') {
@@ -770,8 +524,6 @@ async function startPlayback(opts = {}) {
   if (!res.ok) return { ok: false, error: res.error || 'mpv failed to start' };
 
   lastPlay = { inputs, quality: base.quality };
-  if (opts.cfg && opts.cfg.audio) { const a = opts.cfg.audio; audioState.limiter = a.limiter !== false; audioState.normalize = !!a.normalize; audioState.night = !!a.night; }
-  applyAudio();
   const embedded = mode === 'child' || mode === 'wid' || mode === 'sync';
   if (mode === 'child') scheduleEmbedLayout();
   const ytdlp = findYtDlp();
@@ -919,12 +671,9 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    const finish = () => { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); } closeSplash(); };
-    const wait = splashWin ? Math.max(0, 1300 - (Date.now() - splashShownAt)) : 0;
-    setSplashStatus('mpv ' + (findMpv() ? '✓' : '✗') + '   yt-dlp ' + (findYtDlp() ? '✓' : '✗') + '   ffmpeg ' + (findFfmpeg() ? '✓' : '✗'));
-    setTimeout(finish, wait);
+    mainWindow.show();
     setupThumbar();
-    log('App ready. mpv:', findMpv() || 'NOT FOUND', '| yt-dlp:', findYtDlp() || 'NOT FOUND', '| js runtime:', (findJsRuntime() || {}).kind);
+    log('App ready. mpv:', findMpv() || 'NOT FOUND', '| yt-dlp:', findYtDlp() || 'NOT FOUND');
   });
 
   // Send status + files once the renderer has actually registered its listeners.
@@ -977,17 +726,6 @@ function createMenu() {
         },
         { type: 'separator' },
         {
-          label: 'Update yt-dlp (fixes YouTube / link problems)',
-          click: async () => {
-            const r = await updateYtDlp();
-            dialog.showMessageBox(dialogParent() || undefined, { type: r.ok ? 'info' : 'warning', title: 'yt-dlp', message: r.ok ? 'yt-dlp is up to date' : 'Update failed', detail: r.output });
-          }
-        },
-        {
-          label: 'Open icons folder',
-          click: () => { try { shell.openPath(ICON_DIRS().find((d) => fileExists(d)) || ICON_DIRS()[0]); } catch {} }
-        },
-        {
           label: 'Open log folder',
           click: () => { try { shell.openPath(logDir); } catch {} }
         },
@@ -1008,11 +746,6 @@ function createMenu() {
     {
       label: 'Help',
       submenu: [
-        { label: 'User guide', accelerator: 'F1', click: () => safeSend('hotkey', 'guide') },
-        { label: 'Keyboard shortcuts', accelerator: 'Shift+/', click: () => safeSend('hotkey', 'shortcuts') },
-        { label: 'Tools & health…', click: () => safeSend('hotkey', 'tools') },
-        { label: 'Copy diagnostics (for bug reports)', click: () => safeSend('hotkey', 'diagnostics') },
-        { type: 'separator' },
         {
           label: 'About ZephyrPlayer',
           click: () => {
@@ -1220,15 +953,13 @@ handle('capture:page', async (_e, rect) => {
 
 /* ---- mpv ---- */
 
-handle('mpv:available', () => ({ available: !!findMpv(), path: findMpv(), ytdlp: !!findYtDlp(), jsRuntime: (findJsRuntime() || {}).kind || null }));
-
-handle('ytdlp:update', async () => updateYtDlp());
+handle('mpv:available', () => ({ available: !!findMpv(), path: findMpv(), ytdlp: !!findYtDlp() }));
 
 handle('mpv:playExternal', async (_e, opts) => {
   const o = opts && typeof opts === 'object' && !Array.isArray(opts) ? opts : { files: opts };
   return startPlayback({
     files: o.files, quality: o.quality, embed: o.embed, vo: o.vo, hwdec: o.hwdec,
-    perf: o.perf, startPos: o.startPos, volume: o.volume, mute: o.mute, cookies: o.cookies, cfg: o.cfg
+    perf: o.perf, startPos: o.startPos, volume: o.volume, mute: o.mute
   });
 });
 
@@ -1236,7 +967,7 @@ handle('mpv:loadFile', async (_e, file, startPos) =>
   startPlayback({ files: [file], quality: (lastPlay && lastPlay.quality) || 'high', startPos }));
 
 handle('mpv:playUrl', async (_e, args) => {
-  const { url, quality, embed, startPos, volume, mute, vo, hwdec, perf, cookies, cfg } = args && typeof args === 'object' ? args : {};
+  const { url, quality, embed, startPos, volume, mute, vo, hwdec, perf } = args && typeof args === 'object' ? args : {};
   if (!url || !String(url).trim()) return { ok: false, error: 'empty url' };
   const u = String(url).trim();
   if (/youtube\.com|youtu\.be|vimeo\.com|twitch\.tv|dailymotion\.com/i.test(u) && !findYtDlp()) {
@@ -1245,7 +976,7 @@ handle('mpv:playUrl', async (_e, args) => {
       error: 'yt-dlp required for YouTube. Place yt-dlp.exe next to ZephyrPlayer.\nhttps://github.com/yt-dlp/yt-dlp/releases'
     };
   }
-  return startPlayback({ files: [u], quality: quality || 'high', embed: embed !== false, startPos, volume, mute, vo, hwdec, perf, cookies, cfg });
+  return startPlayback({ files: [u], quality: quality || 'high', embed: embed !== false, startPos, volume, mute, vo, hwdec, perf });
 });
 
 handle('mpv:stop', async () => {
@@ -1260,8 +991,7 @@ handle('mpv:setQuality', async (_e, quality) => {
   return startPlayback({
     files: s.inputs, quality: quality || (s.opts && s.opts.quality) || 'high',
     vo: s.opts && s.opts.vo, hwdec: s.opts && s.opts.hwdec, perf: s.opts && s.opts.perf,
-    startPos: s.lastTime, volume: Number(s.props.volume), mute: !!s.props.mute, embed: true, restart: true,
-    cookies: s.opts && s.opts.cookies, cfg: s.opts && s.opts.cfg && Object.assign({}, s.opts.cfg, { extra: '' })
+    startPos: s.lastTime, volume: Number(s.props.volume), mute: !!s.props.mute, embed: true, restart: true
   });
 });
 
@@ -1281,18 +1011,24 @@ handle('mpv:applyVideoAdj', async (_e, adj) => {
   return { ok: true, live: s.connected };
 });
 
+function buildAudioFilter(eq) {
+  const f = [];
+  if (eq && eq.normalize) f.push('loudnorm');
+  const bass = clampNum(eq && eq.bass, -15, 15), mid = clampNum(eq && eq.mid, -15, 15), treble = clampNum(eq && eq.treble, -15, 15);
+  if (bass || mid || treble) {
+    f.push(`equalizer=f=100:width_type=o:width=2:g=${bass}`);
+    f.push(`equalizer=f=1000:width_type=o:width=2:g=${mid}`);
+    f.push(`equalizer=f=8000:width_type=o:width=2:g=${treble}`);
+  }
+  const gain = clampNum(eq && eq.gain, 0, 20);
+  if (gain) f.push(`volume=${gain}dB`);
+  return f.length ? 'lavfi=[' + f.join(',') + ']' : '';
+}
+
 handle('mpv:applyEq', async (_e, eq) => {
   const s = needSession();
-  audioState.eq = eq && typeof eq === 'object' ? eq : {};
-  await applyAudio();
+  await s.setProp('af', buildAudioFilter(eq || {}));
   return { ok: true, live: s.connected };
-});
-
-handle('mpv:applyAudioPrefs', async (_e, p) => {
-  p = p && typeof p === 'object' ? p : {};
-  audioState.limiter = p.limiter !== false; audioState.normalize = !!p.normalize; audioState.night = !!p.night;
-  await applyAudio();
-  return { ok: true };
 });
 
 handle('mpv:frameStep', async (_e, dir) => {
@@ -1422,219 +1158,6 @@ handle('mpv:getState', async () => {
   return { ok: true, running: !!(s && s.alive), props: s && s.connected ? Object.assign({}, s.props) : {} };
 });
 
-/* ---- media info, posters, icons, playlists ---- */
-
-handle('media:probe', async (_e, file) => getProbe().probe(file));
-
-handle('media:thumb', async (_e, file, duration, cover) => {
-  const out = await getProbe().thumb(file, duration, !!cover);
-  return { ok: !!out, path: out };
-});
-
-const ICON_DIRS = () => Array.from(new Set([path.join(getAppPath(), 'assets', 'icons'), path.join(__dirname, 'assets', 'icons')]));
-
-// Reads every icon file (svg/png) so the UI can use user-supplied replacements without file:// mask restrictions.
-handle('icons:getAll', async () => {
-  const out = {};
-  for (const dir of ICON_DIRS()) {
-    let names;
-    try { names = await fs.promises.readdir(dir); } catch { continue; }
-    for (const f of names) {
-      const m = f.match(/^([a-z0-9][a-z0-9-]*)\.(svg|png)$/i);
-      if (!m) continue;
-      const name = m[1].toLowerCase();
-      if (out[name] && out[name].type === 'svg') continue;           // svg wins over png
-      try {
-        const full = path.join(dir, f);
-        const st = await fs.promises.stat(full);
-        if (st.size > 200 * 1024) continue;
-        const buf = await fs.promises.readFile(full);
-        out[name] = m[2].toLowerCase() === 'svg'
-          ? { type: 'svg', data: buf.toString('utf8') }
-          : { type: 'png', data: buf.toString('base64') };
-      } catch {}
-    }
-  }
-  return { ok: true, icons: out };
-});
-
-handle('icons:openFolder', async () => {
-  const dir = ICON_DIRS().find((d) => fileExists(d)) || ICON_DIRS()[0];
-  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
-  await shell.openPath(dir);
-  return { ok: true, dir };
-});
-
-// Expand a YouTube/other playlist URL into individual entries (flat, fast, no downloads).
-handle('ytdlp:playlist', async (_e, url, cookies) => {
-  const ytdlp = findYtDlp();
-  if (!ytdlp) return { ok: false, error: 'yt-dlp not found next to the app' };
-  const u = String(url || '').trim();
-  if (!mediaUtils.isUrl(u)) return { ok: false, error: 'Not a URL' };
-  const { args, env } = ytdlArgsFor(cookies);
-  const a = args.filter((x) => x !== '--no-playlist');
-  return new Promise((resolve) => {
-    execFile(ytdlp, [...a, '--flat-playlist', '-J', '--', u], { timeout: 90000, windowsHide: true, env, maxBuffer: 64 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        if (err && !stdout) { resolve({ ok: false, error: friendlyYtdlError(String(stderr || err.message)) }); return; }
-        try {
-          const j = JSON.parse(String(stdout));
-          const entries = (j.entries || []).filter(Boolean).slice(0, 500).map((e) => ({
-            title: e.title || e.id || '', duration: Number(e.duration) || 0,
-            url: e.url && /^https?:/i.test(e.url) ? e.url : (e.webpage_url || (e.id ? 'https://www.youtube.com/watch?v=' + e.id : ''))
-          })).filter((e) => e.url);
-          resolve({ ok: entries.length > 0, title: j.title || '', entries, error: entries.length ? null : 'No videos found in this link' });
-        } catch (e) { resolve({ ok: false, error: 'Could not read playlist: ' + e.message }); }
-      });
-  });
-});
-
-/* ---- online posters/info (the renderer only calls this when the user has opted in) ---- */
-
-handle('online:lookup', async (_e, q) => {
-  if (!q || q.allow !== true) return { ok: false, error: 'Online lookup is off' };
-  const clean = {
-    kind: ['tv', 'movie', 'music', 'video'].includes(q.kind) ? q.kind : 'movie',
-    title: String(q.title || '').slice(0, 160), artist: String(q.artist || '').slice(0, 120),
-    year: Number(q.year) || null, season: Number(q.season) || null, episode: Number(q.episode) || null,
-    url: /^https?:\/\//i.test(String(q.url || '')) ? String(q.url).slice(0, 400) : ''
-  };
-  const svc = getOnline();
-  const r = await svc.lookup(clean);
-  if (!r || !r.ok) return r || { ok: false };
-  const out = Object.assign({}, r);
-  const file = await svc.poster(r.posters || []);
-  if (file) { out.posterPath = file; out.accent = posterAccent(file); }
-  if (r.stills && r.stills.length) { const f2 = await svc.poster(r.stills); if (f2) out.stillPath = f2; }
-  delete out.posters; delete out.stills;
-  return out;
-});
-
-handle('online:clearCache', async () => {
-  let removed = 0;
-  try {
-    const dir = path.join(app.getPath('userData'), 'posters');
-    for (const f of fs.readdirSync(dir)) { try { fs.unlinkSync(path.join(dir, f)); removed++; } catch {} }
-  } catch {}
-  try { fs.unlinkSync(path.join(app.getPath('userData'), 'online-cache.json')); } catch {}
-  onlineSvc = null;
-  return { ok: true, removed };
-});
-
-/* ---- clips from the A-B loop ---- */
-
-handle('media:exportClip', async (_e, o) => {
-  o = o || {};
-  const input = typeof o.path === 'string' ? o.path : '';
-  const mode = ['copy', 'precise', 'gif'].includes(o.mode) ? o.mode : 'precise';
-  const start = Number(o.start), end = Number(o.end);
-  const hasVideo = o.hasVideo !== false;
-  if (!input || !fileExists(input)) return { ok: false, error: 'Clips need a local file (not a stream)' };
-  const suggested = path.join(path.dirname(input), mediaTools.clipName(input, start, end, mode, hasVideo));
-  const ext = path.extname(suggested).slice(1);
-  const res = await showSave({ title: 'Save clip', defaultPath: suggested, filters: [{ name: 'Clip', extensions: [ext] }] });
-  if (res.canceled || !res.filePath) return { ok: false, cancelled: true };
-  const r = await mediaTools.exportClip(findFfmpeg(), { input, start, end, mode, out: res.filePath, hasVideo, ffprobePath: findFfprobe() });
-  return r;
-});
-
-handle('shell:showItem', async (_e, file) => {
-  if (typeof file === 'string' && fileExists(file)) { shell.showItemInFolder(file); return { ok: true }; }
-  return { ok: false };
-});
-
-/* ---- tools & health ---- */
-
-async function collectTools() {
-  const jsrt = findJsRuntime();
-  const defs = [
-    { name: 'mpv', path: findMpv(), args: ['--version'], role: 'Plays mkv / HEVC / everything', required: true },
-    { name: 'yt-dlp', path: findYtDlp(), args: ['--version'], role: 'YouTube and other sites', required: true },
-    { name: getEdition().preferQuickJs ? 'quickjs' : 'deno', path: jsrt && /^(deno|quickjs)/.test(jsrt.kind) ? (jsrt.value ? jsrt.value.replace(/^(deno|quickjs):/, '') : 'deno') : null, args: getEdition().preferQuickJs ? ['--help'] : ['--version'], role: 'JavaScript runtime for YouTube', required: true },
-    { name: 'ffmpeg', path: findFfmpeg(), args: ['-version'], role: 'Posters, clips, convert, record', required: false },
-    { name: 'ffprobe', path: findFfprobe(), args: ['-version'], role: 'Fast file info', required: false },
-    { name: 'whisper', path: findWhisper(), args: ['--help'], role: 'Local AI subtitles', required: false }
-  ];
-  const out = [];
-  for (const d of defs) {
-    const version = d.path && d.name !== 'whisper' ? await mediaTools.getVersion(d.path, d.args) : null;
-    out.push({ name: d.name, path: d.path || null, version: version || (d.path ? 'found' : null), role: d.role, required: d.required });
-  }
-  return { tools: out, jsRuntime: jsrt ? jsrt.kind : null };
-}
-
-// In an installed app __dirname is inside the read-only app archive where PowerShell cannot run a script:
-// look next to the exe first (the installer puts it there), then in resources.
-function findSetupScript() {
-  const cands = [path.join(getAppPath(), 'setup-tools.ps1'), path.join(process.resourcesPath || getAppPath(), 'setup-tools.ps1'), path.join(__dirname, 'setup-tools.ps1')];
-  return cands.find((c) => fileExists(c) && !/\.asar[\\/]/.test(c)) || null;
-}
-
-handle('tools:status', async () => {
-  toolCache.clear();
-  const r = await collectTools();
-  return Object.assign({ ok: true, edition: getEdition().label, canInstall: process.platform === 'win32' && !!findSetupScript() }, r);
-});
-
-let installProc = null;
-handle('tools:install', async (_e, opts) => {
-  if (process.platform !== 'win32') return { ok: false, error: 'The installer script is for Windows. See TOOLS.md.' };
-  if (installProc) return { ok: false, error: 'An install is already running' };
-  const script = findSetupScript();
-  if (!script) return { ok: false, error: 'setup-tools.ps1 was not found next to the app' };
-  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-NoGitignore'];
-  if (opts && opts.testOnly) args.push('-TestOnly');
-  if (!(opts && opts.whisper)) args.push('-SkipWhisper');      // the script installs whisper by default
-  if (opts && opts.force) args.push('-Force');
-  return new Promise((resolve) => {
-    let tail = '';
-    try { installProc = spawn('powershell.exe', args, { windowsHide: true, cwd: path.dirname(script) }); }
-    catch (e) { installProc = null; resolve({ ok: false, error: e.message }); return; }
-    const feed = (d) => {
-      const text = d.toString();
-      tail = (tail + text).slice(-4000);
-      text.split(/\r?\n/).filter((l) => l.trim()).forEach((l) => safeSend('tools-progress', { line: l.slice(0, 300) }));
-    };
-    installProc.stdout.on('data', feed);
-    installProc.stderr.on('data', feed);
-    installProc.once('error', (e) => { installProc = null; resolve({ ok: false, error: e.message }); });
-    installProc.once('close', (code) => { installProc = null; toolCache.clear(); resolve({ ok: code === 0, code, tail: tail.slice(-600) }); });
-  });
-});
-
-handle('diag:collect', async () => {
-  const { tools, jsRuntime } = await collectTools();
-  let gpu = '';
-  try {
-    const info = await app.getGPUInfo('basic');
-    const d = info && info.gpuDevice && info.gpuDevice[0];
-    if (d) gpu = `${d.vendorString || ''} ${d.deviceString || ''} (driver ${d.driverVersion || '?'})`.trim();
-  } catch {}
-  let logText = '';
-  try { logText = fs.readFileSync(logFile, 'utf8').split(/\r?\n/).slice(-80).join('\n'); } catch {}
-  const text = mediaTools.buildDiagnostics({
-    version: app.getVersion() + ' · ' + getEdition().label, electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node,
-    os: `${os.type()} ${os.release()} ${os.arch()}`, cpu: (os.cpus()[0] || {}).model || '?', ram: Math.round(os.totalmem() / 1073741824) + ' GB',
-    gpu, tools: tools.map((t) => ({ name: t.name, path: t.path, version: t.version })), jsRuntime, settings: getSettings(),
-    log: logText.replace(new RegExp(os.homedir().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '~')
-  });
-  try { clipboard.writeText(text); } catch {}
-  return { ok: true, text };
-});
-
-handle('app:getSetting', async (_e, key) => ({ ok: true, value: getSettings()[key] }));
-handle('app:setSetting', async (_e, key, value) => ({ ok: setSetting(String(key), value) }));
-
-handle('docs:open', async (_e, which) => {
-  const names = { guide: 'README.md', tools: 'TOOLS.md', changes: 'CHANGES.md' };
-  const f = names[which];
-  const candidates = f ? [path.join(__dirname, f), path.join(__dirname, 'docs', f), path.join(getAppPath(), f)] : [];
-  const found = candidates.find((c) => fileExists(c));
-  if (!found) return { ok: false, error: 'Documentation file not found' };
-  const err = await shell.openPath(found);
-  return { ok: !err, error: err || null };
-});
-
 handle('shell:openExternal', async (_e, url) => {
   const u = String(url || '');
   if (!/^(https?:|mailto:|ms-settings:)/i.test(u)) return { ok: false, error: 'Blocked URL scheme' };
@@ -1643,7 +1166,7 @@ handle('shell:openExternal', async (_e, url) => {
 });
 
 handle('mpv:setEmbedMode', async (_e, mode) => {
-  const next = mode === 'child' ? 'child' : 'off';   // legacy 'wid'/'sync' modes covered the whole UI; retired
+  const next = ['child', 'sync', 'wid', 'off'].includes(mode) ? mode : 'off';
   embedMode = next;
   return { ok: true, mode: embedMode };
 });
@@ -2123,46 +1646,52 @@ function getAssociationExecutable() {
 }
 
 handle('assoc:exportReg', async () => {
-  if (process.platform !== 'win32') return { ok: false, error: 'Windows only' };
-  const exe = getAssociationExecutable();
-  const cmd = fileAssoc.openCommand({ exe, appDir: __dirname, packaged: app.isPackaged });
-  const esc = (v) => String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');          // escape ONCE for the .reg format
+  if (process.platform !== 'win32') {
+    return { ok: false, error: 'Windows only' };
+  }
+
+  const exe = getAssociationExecutable().replace(/\\/g, '\\\\');
+  const isPackaged = app.isPackaged;
+
+  const types = ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'webm', 'm4v', 'ts', 'mp3', 'flac', 'wav'];
+
+  let command;
+  if (isPackaged) {
+    command = `"${exe}" "%1"`;
+  } else {
+    const appDir = __dirname.replace(/\\/g, '\\\\');
+    command = `"${exe}" "${appDir}" "%1"`;
+  }
+
+  command = command.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
   let reg = 'Windows Registry Editor Version 5.00\r\n\r\n';
-  reg += '[HKEY_CURRENT_USER\\Software\\Classes\\' + fileAssoc.PROGID + ']\r\n@="ZephyrPlayer media file"\r\n\r\n';
-  reg += '[HKEY_CURRENT_USER\\Software\\Classes\\' + fileAssoc.PROGID + '\\shell\\open\\command]\r\n@="' + esc(cmd) + '"\r\n\r\n';
-  for (const ext of fileAssoc.selectedExts()) reg += '[HKEY_CURRENT_USER\\Software\\Classes\\.' + ext + '\\OpenWithProgids]\r\n"' + fileAssoc.PROGID + '"=hex(0):\r\n\r\n';
-  const res = await showSave({ title: 'Save registry file', defaultPath: 'zephyrplayer-associations.reg', filters: [{ name: 'Registry file', extensions: ['reg'] }] });
-  if (res.canceled || !res.filePath) return { ok: false, cancelled: true };
-  await fs.promises.writeFile(res.filePath, '\uFEFF' + reg, 'utf8');
-  return { ok: true, path: res.filePath };
-});
+  reg += '[HKEY_CURRENT_USER\\Software\\Classes\\ZephyrPlayer.File]\r\n';
+  reg += '@="ZephyrPlayer media"\r\n';
+  reg += '"FriendlyTypeName"="ZephyrPlayer media"\r\n\r\n';
+  reg += '[HKEY_CURRENT_USER\\Software\\Classes\\ZephyrPlayer.File\\shell\\open\\command]\r\n';
+  reg += '@="' + command + '"\r\n\r\n';
 
-function assocCtx(select) { return { exe: getAssociationExecutable(), appDir: __dirname, packaged: app.isPackaged, select }; }
-handle('assoc:status', async () => (process.platform === 'win32' ? fileAssoc.status() : { ok: false, error: 'Windows only' }));
-handle('assoc:register', async (_e, select) => (process.platform === 'win32' ? fileAssoc.register(assocCtx(select && typeof select === 'object' ? select : undefined)) : { ok: false, error: 'Windows only' }));
-handle('assoc:unregister', async () => (process.platform === 'win32' ? fileAssoc.unregister(assocCtx()) : { ok: false, error: 'Windows only' }));
+  for (const ext of types) {
+    reg += '[HKEY_CURRENT_USER\\Software\\Classes\\.' + ext + '\\OpenWithProgids]\r\n';
+    reg += '"ZephyrPlayer.File"=""\r\n\r\n';
+  }
 
-handle('external:list', async () => ({ ok: true, players: process.platform === 'win32' ? externalPlayers.detectPlayers() : [] }));
-handle('external:open', async (_e, o) => {
-  o = o || {};
-  const list = externalPlayers.detectPlayers();
-  const player = list.find((p) => p.id === o.id) || (o.id === 'auto' || !o.id ? list[0] : null);
-  if (!player) return { ok: false, error: 'No other player found' };
-  if (typeof o.file !== 'string' || (!mediaUtils.isUrl(o.file) && !fileExists(o.file))) return { ok: false, error: 'File not found' };
-  return externalPlayers.openIn(player, o.file);
-});
+  const result = await showSave({
+    title: 'Save file association registry',
+    defaultPath: 'ZephyrPlayer-associations.reg',
+    filters: [{ name: 'Registry', extensions: ['reg'] }]
+  });
 
-handle('app:openFolder', async (_e, which) => {
-  const dirs = { data: app.getPath('userData'), logs: logDir, icons: ICON_DIRS().find((d) => fileExists(d)) || ICON_DIRS()[0] };
-  const d = dirs[which];
-  if (!d) return { ok: false };
-  try { fs.mkdirSync(d, { recursive: true }); } catch {}
-  const err = await shell.openPath(d);
-  return { ok: !err, error: err || null };
+  if (result.canceled || !result.filePath) return { ok: false };
+
+  try {
+    fs.writeFileSync(result.filePath, reg, 'utf8');
+    return { ok: true, path: result.filePath };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
 });
-handle('app:toggleDevTools', async () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.toggleDevTools(); return { ok: true }; });
-handle('app:getEdition', async () => Object.assign({ ok: true, version: app.getVersion() }, getEdition()));
-handle('codec:report', async () => mediaTools.codecReport(findFfmpeg()));
 
 handle('shell:openDefaults', async () => {
   try {
@@ -2188,7 +1717,6 @@ handle('app:getInfo', async () => ({
 app.whenReady().then(() => {
   log('ZephyrPlayer starting... isPackaged:', app.isPackaged);
   pruneOldLogs();
-  showSplash();
 
   loadRecentFiles();
   updateJumpList();
@@ -2199,7 +1727,6 @@ app.whenReady().then(() => {
   createTray();
 
   setTimeout(setupAutoUpdate, 4000);
-  setTimeout(maybeAutoUpdateYtDlp, 20000);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

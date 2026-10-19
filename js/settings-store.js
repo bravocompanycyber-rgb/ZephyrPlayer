@@ -87,6 +87,12 @@
       label: 'Performance', tip: '"Low" uses simpler processing for old or battery-powered PCs. The player also lowers quality by itself if frames start dropping.' },
     { id: 'fsLine', group: 'video', level: 'basic', type: 'toggle', def: true, legacy: 'zephyr-fsline', legacyBool: true,
       label: 'Thin progress line in fullscreen', tip: 'Keeps a slim progress bar at the bottom edge while the controls are hidden in fullscreen.' },
+    { id: 'fsReveal', group: 'video', level: 'basic', type: 'select', def: 'move', options: opt([['move', 'When the mouse moves (and at the edges)'], ['edges', 'Only at the screen edges']]),
+      label: 'Fullscreen controls appear', tip: 'In fullscreen the seek bar and buttons are hidden. Choose whether any mouse movement shows them, or only moving to the bottom edge. The playlist always opens from the right edge.' },
+    { id: 'deinterlace', group: 'video', level: 'advanced', type: 'toggle', def: false,
+      label: 'Deinterlace', tip: 'Removes the comb-like lines from interlaced video (old TV recordings, some DVDs). Leave off for normal video.' },
+    { id: 'smoothMotion', group: 'video', level: 'advanced', type: 'toggle', def: false,
+      label: 'Smooth motion', tip: 'Blends frames to match your screen\'s refresh rate so panning looks smoother. Uses more GPU; needs the mpv engine.' },
     { id: 'vo', group: 'video', level: 'advanced', type: 'select', def: 'gpu', legacy: 'zephyr-settingVo', options: opt([['gpu', 'GPU (standard)'], ['gpu-next', 'GPU-next (newer, better HDR)']]),
       label: 'Video output', tip: 'The mpv renderer. "gpu-next" has better HDR and scaling but can be less stable on old drivers.' },
     { id: 'hwdec', group: 'video', level: 'advanced', type: 'select', def: 'auto', legacy: 'zephyr-settingHwdec', options: opt([['auto', 'Automatic (recommended)'], ['d3d11va', 'D3D11VA'], ['dxva2', 'DXVA2 (older PCs)'], ['nvdec', 'NVIDIA NVDEC'], ['no', 'Off (software only)']]),
@@ -131,6 +137,8 @@
     /* ---------------- system */
     { id: 'failAction', group: 'system', level: 'basic', type: 'select', def: 'ask', options: opt([['ask', 'Offer other players'], ['auto', 'Open in another player automatically'], ['never', 'Just show a message']]),
       label: 'When a file will not play', tip: 'If both built-in engines fail, ZephyrPlayer can hand the file to VLC, MPC-HC (the K-Lite Codec Pack player), PotPlayer or another installed player.' },
+    { id: 'toolUpdates', group: 'system', level: 'basic', type: 'select', def: 'notify', options: opt([['notify', 'Tell me when updates exist'], ['auto', 'Update automatically'], ['off', 'Never check']]),
+      label: 'Updates for mpv, yt-dlp, Deno, FFmpeg', tip: 'Checks the official release pages once a day. "Tell me" shows a banner you can click; "automatically" downloads newer versions quietly. yt-dlp also updates itself every few days because YouTube changes often.' },
     { id: 'externalPlayer', group: 'system', level: 'basic', type: 'select', def: 'auto', dynamic: 'externalPlayers', options: opt([['auto', 'First one found']]),
       label: 'Preferred other player', tip: 'Which installed player is used for "Play with…" and for automatic hand-over.' },
 

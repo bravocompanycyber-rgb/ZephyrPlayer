@@ -12,6 +12,9 @@ w.electronAPI = new Proxy({
   probeMedia: async (p) => /missing/.test(p) ? { ok: false, error: 'missing' } : /hevc/.test(p) ? { ok: true, duration: 5400, size: 2e9, width: 1920, height: 1080, hasVideo: true, vcodec: 'hevc', acodec: 'ac3', bitDepth: 10, audioTracks: 2, subTracks: 3, hdr: 'HDR10' } : /song/.test(p) ? { ok: true, duration: 200, hasVideo: false, acodec: 'mp3', title: 'Real Title', artist: 'Band' } : { ok: true, duration: 600, size: 1e8, width: 1280, height: 720, hasVideo: true, vcodec: 'h264', acodec: 'aac', bitDepth: 8, audioTracks: 1, subTracks: 0 },
   thumbMedia: async (p) => ({ ok: true, path: '/cache/' + p.split('/').pop() + '.jpg' }),
   getIcons: async () => ({ ok: true, icons: { play: { type: 'svg', data: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24"/></svg>' } } }),
+  siblings: async () => ({ ok: true, media: [{ path: '/tv/Show.S01E04.mkv', name: 'Show.S01E04.mkv', size: 1 }, { path: '/tv/Unrelated.Film.2001.mp4', name: 'Unrelated.Film.2001.mp4', size: 1 }] }),
+  trashFiles: async (paths) => { calls.push(['trash', paths]); return { ok: true, results: paths.map((p) => ({ path: p, ok: true })) }; },
+  showItem: async (f) => { calls.push(['show', f]); return { ok: true }; },
   externalList: async () => ({ ok: true, players: [{ id: 'mpc-hc', name: 'MPC-HC', path: 'C:/Program Files (x86)/K-Lite Codec Pack/MPC-HC64/mpc-hc64.exe', klite: true }, { id: 'vlc', name: 'VLC media player', path: 'C:/vlc.exe' }] }),
   externalOpen: async (o) => { calls.push(['extopen', o]); return { ok: true }; },
   assocStatus: async () => ({ ok: true, registered: 3, total: 40 }), assocRegister: async (sel) => { calls.push(['assoc', sel]); return { ok: true }; }, assocUnregister: async () => ({ ok: true }),
@@ -168,7 +171,7 @@ const key = (k, extra = {}) => w.document.dispatchEvent(new w.KeyboardEvent('key
   assert(!d.getElementById('welcomePanel').hidden, 'welcome on first run'); assert(d.querySelectorAll('#welcomeSwatches .swatch').length === 15);
   d.getElementById('welcomeGo').click(); assert(d.getElementById('welcomePanel').hidden); assert.strictEqual(w.localStorage.getItem('zephyr-welcomed'), '1');
   // -- fullscreen immersive UI: hidden by default, bottom reveals controls, right edge reveals playlist, L pins
-  FS_EL.v = d.documentElement; d.dispatchEvent(new w.Event('fullscreenchange')); assert(d.body.classList.contains('is-fs'));
+  w.ZSettings.set('fsReveal', 'edges'); FS_EL.v = d.documentElement; d.dispatchEvent(new w.Event('fullscreenchange')); assert(d.body.classList.contains('is-fs'));
   assert(!d.body.classList.contains('fs-bottom') && !d.body.classList.contains('fs-side'), 'hidden at first');
   mm(500, 400); await sleep(250); assert(!d.body.classList.contains('fs-bottom'));
   mm(500, 740); await sleep(50); assert(d.body.classList.contains('fs-bottom'), 'mouse at bottom shows seek bar + buttons');
@@ -260,6 +263,38 @@ const key = (k, extra = {}) => w.document.dispatchEvent(new w.KeyboardEvent('key
   calls.length = 0; ZS.set('failAction', 'auto'); w.ZApp.emit('playfail', bad, 'boom'); await sleep(80); assert(calls.some((c) => c[0] === 'extopen' && c[1].id === 'mpc-hc'), 'automatic hand-over'); calls.length = 0; ZS.set('failAction', 'never'); w.ZApp.emit('playfail', bad, 'boom'); await sleep(80); assert(!calls.some((c) => c[0] === 'extopen'));
   // -- tools panel: edition + codec report
   d.getElementById('toolsBtn').click(); await sleep(120); assert(/Modern edition/.test(d.getElementById('editionLabel').textContent)); d.getElementById('codecBtn').click(); await sleep(120); assert(/✓ HEVC/.test(d.getElementById('codecReport').textContent) && d.querySelector('#codecReport .codec.no') && /d3d11va/.test(d.getElementById('codecReport').textContent), 'codec support list'); d.getElementById('closeTools').click();
+  // ================= v6: fullscreen reveal on mouse move, playlist menu + multi-select + runtime, play similar, delete, jump, links =================
+  w.ZSettings.set('fsReveal', 'move'); FS_EL.v = d.documentElement; d.dispatchEvent(new w.Event('fullscreenchange'));
+  assert(!d.body.classList.contains('fs-bottom'), 'hidden until the mouse moves'); mm(500, 300); await sleep(60); mm(520, 310); await sleep(60);
+  assert(d.body.classList.contains('fs-bottom') && d.body.classList.contains('fs-top') && !d.body.classList.contains('fs-side'), 'a plain mouse move shows seek bar + title but not the playlist');
+  await sleep(3700); assert(!d.body.classList.contains('fs-bottom') && !d.body.classList.contains('fs-top'), 'and they hide again after the mouse is still');
+  mm(1020, 300); await sleep(60); assert(d.body.classList.contains('fs-side'), 'playlist from the right edge');
+  vid.dispatchEvent(new w.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 300, clientY: 200 })); let zc = d.querySelector('.zctx'); assert(zc && zc.parentElement === d.body && /Play \/ pause/.test(zc.textContent) && /Jump to time/.test(zc.textContent), 'video right-click menu in fullscreen');
+  d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); assert(!d.querySelector('.zctx'), 'Esc closes the menu');
+  FS_EL.v = null; d.dispatchEvent(new w.Event('fullscreenchange'));
+  d.getElementById('clearPlaylistBtn').click(); await sleep(30); await listeners.open(['/tv/Show.S01E01.mkv', '/tv/Show.S01E02.mkv', '/tv/Show.S01E03.mkv', '/tv/Other.Movie.2019.mp4']); await sleep(700);
+  const prow = () => Array.from(d.querySelectorAll('#playlist .playlist-item')); const foot = () => d.getElementById('trackCount').textContent; const cl = (el, o) => el.dispatchEvent(new w.MouseEvent('click', Object.assign({ bubbles: true }, o)));
+  assert(/4 tracks · 40m 00s/.test(foot()), 'total runtime of the playlist: ' + foot()); cl(prow()[0], { ctrlKey: true }); cl(prow()[2], { ctrlKey: true });
+  assert(/2 selected · 20m 00s/.test(foot()) && prow()[0].classList.contains('selected') && !prow()[1].classList.contains('selected'), 'Ctrl+click selects and shows the selected runtime: ' + foot());
+  const pl = d.getElementById('playlist'); pl.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'a', ctrlKey: true, bubbles: true, cancelable: true })); assert(/4 selected · 40m 00s/.test(foot()), 'Ctrl+A'); pl.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); assert(/4 tracks/.test(foot()), 'Esc clears the selection');
+  prow()[1].dispatchEvent(new w.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 60, clientY: 80 })); zc = d.querySelector('.zctx'); assert(zc, 'playlist context menu');
+  for (const w2 of ['1 item · 10m 00s', 'Play next', 'Play similar', 'Open file location', 'Copy file path', 'Details & poster', 'Remove from playlist', 'Delete file', 'Select all']) assert(zc.textContent.includes(w2), 'menu has "' + w2 + '"');
+  const item = (label) => Array.from(d.querySelectorAll('.zctx .zitem')).find((b) => b.textContent.includes(label));
+  calls.length = 0; item('Open file location').click(); assert.strictEqual(calls.find((c) => c[0] === 'show')[1], '/tv/Show.S01E02.mkv'); assert(!d.querySelector('.zctx'), 'menu closes after an action');
+  d.getElementById('clearPlaylistBtn').click(); await sleep(30); await listeners.open(['/tv/Show.S01E02.mkv', '/tv/Show.S01E01.mkv', '/tv/Show.S01E03.mkv', '/tv/Other.Movie.2019.mp4']); await sleep(700); calls.length = 0;
+  prow().find((li) => /S01E02/.test(li.textContent)).dispatchEvent(new w.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })); item('Play similar').click(); await sleep(900);
+  const names = w.ZApp.playlist.map((i) => i.name); console.log('after play similar:', names.join(' | ')); assert(names.includes('Show.S01E04') && !names.includes('Unrelated.Film.2001'), 'same-show siblings are added, unrelated ones are not');
+  const c0 = w.ZApp.currentIndex; assert.strictEqual(names.slice(c0, c0 + 4).join('|'), 'Show.S01E02|Show.S01E03|Show.S01E04|Show.S01E01', 'the show plays on from here, in order');
+  const idx4 = prow().findIndex((li) => /S01E04/.test(li.textContent)); prow()[idx4].dispatchEvent(new w.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })); calls.length = 0;
+  item('Delete file').click(); assert(item('Recycle Bin') && !calls.some((c) => c[0] === 'trash'), 'first click only arms the delete'); item('Recycle Bin').click(); await sleep(900);
+  assert.strictEqual(JSON.stringify(calls.find((c) => c[0] === 'trash')[1]), JSON.stringify(['/tv/Show.S01E04.mkv'])); assert(!w.ZApp.playlist.some((i) => i.name === 'Show.S01E04'), 'deleted file leaves the playlist');
+  calls.length = 0; cl(prow()[0], { ctrlKey: true }); const beforeLen = w.ZApp.playlist.length; pl.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true })); await sleep(30); assert.strictEqual(w.ZApp.playlist.length, beforeLen - 1); assert(!calls.some((c) => c[0] === "trash"), "the Delete key never deletes files");
+  const P = w.ZApp.parseTimeSpec; assert.strictEqual(P('1:23:45', 0, 9999), 5025); assert.strictEqual(P('90', 0, 9999), 90); assert.strictEqual(P('+30', 100, 9999), 130); assert.strictEqual(P('-10', 100, 9999), 90); assert.strictEqual(P('50%', 0, 200), 100); assert.strictEqual(P('1h2m3s', 0, 9999), 3723); assert.strictEqual(P('abc', 0, 100), null); assert.strictEqual(P('999', 0, 100), 99.5); assert.strictEqual(P('-500', 10, 100), 0);
+  listeners.state({ duration: 600, 'time-pos': 12, pause: false }); await sleep(30); calls.length = 0; key('g', { ctrlKey: true }); assert(!d.getElementById('jumpPanel').hidden, 'Ctrl+G opens jump'); d.getElementById('jumpInput').value = '1:30'; d.getElementById('jumpInput').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); await sleep(30);
+  assert(calls.some((c) => c[0] === 'cmd' && c[1] === 'seek' && c[2][0] === 90), 'jumped to 1:30'); assert(d.getElementById('jumpPanel').hidden);
+  Object.defineProperty(w.navigator, 'clipboard', { value: { readText: async () => 'https://youtu.be/clip1', writeText: async () => {} }, configurable: true }); calls.length = 0; key('v', { ctrlKey: true }); await sleep(300); assert(calls.some((c) => c[0] === 'url' && c[1] === 'https://youtu.be/clip1'), 'Ctrl+V opens the clipboard link');
+  calls.length = 0; const dr = new w.Event('drop', { bubbles: true, cancelable: true }); dr.dataTransfer = { files: [], types: ['text/uri-list'], getData: (t) => (t === 'text/uri-list' ? 'https://example.com/v.mp4' : '') }; d.dispatchEvent(dr); await sleep(300); assert(calls.some((c) => c[0] === 'url' && c[1] === 'https://example.com/v.mp4') && dr.defaultPrevented, 'dropped link opens');
+  calls.length = 0; w.ZSettings.set('smoothMotion', true); w.ZSettings.set('deinterlace', true); await sleep(30); const sm = calls.filter((c) => c[0] === 'set').map((c) => c[1]); assert(sm.some((m) => m['video-sync'] === 'display-resample' && m.interpolation === true) && sm.some((m) => m.deinterlace === true), 'video options reach mpv live'); w.ZSettings.reset('smoothMotion'); w.ZSettings.reset('deinterlace');
   assert.strictEqual(JSON.stringify(errs), JSON.stringify([]));
   console.log('DOM SMOKE TEST PASSED'); process.exit(0);
 })().catch(e => { console.error('FAIL', e, errs); process.exit(1); });

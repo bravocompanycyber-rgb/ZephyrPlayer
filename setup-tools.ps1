@@ -22,6 +22,8 @@
 .PARAMETER DryRun         Only print what would be downloaded; change nothing.
 .PARAMETER Edition        auto (default) | modern | legacy. "legacy" is for Windows 7 / 8 / 8.1: it uses QuickJS (Deno needs Windows 10),
                   32-bit downloads on 32-bit Windows, and nothing that needs PowerShell 5. "auto" picks it from your Windows version.
+.PARAMETER InstallDir    Put the tools here instead of next to this script (the installed app uses its user-data folder, which survives updates).
+.PARAMETER Only           Install/update only these parts: ytdlp, js, mpv, ffmpeg, whisper (comma separated). Used by the app's per-tool buttons.
 .PARAMETER Whisper        (kept for old command lines: whisper is installed by default now)
 .PARAMETER WhisperModel   (kept for old command lines: the model is installed by default now)
 
@@ -44,6 +46,8 @@ param(
   [switch]$SkipTests,
   [switch]$DryRun,
   [ValidateSet('auto', 'modern', 'legacy')][string]$Edition = 'auto',
+  [string]$Only = '',
+  [string]$InstallDir = '',
   [switch]$Whisper,
   [switch]$WhisperModel
 )
@@ -54,6 +58,7 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 
 $Root = $PSScriptRoot
 if ([string]::IsNullOrEmpty($Root)) { $Root = (Get-Location).Path }
+if ($InstallDir) { try { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null; $Root = $InstallDir } catch { Write-Host ('Cannot use -InstallDir: ' + $_.Exception.Message) } }
 if ($ModelName -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid -ModelName '$ModelName'" }
 # ---- which edition? (Windows 7 / 8 / 8.1 = legacy; the Windows version is read the reliable way)
 $WinVersion = [version]'10.0'
@@ -61,6 +66,9 @@ try { $WinVersion = [version](Get-WmiObject -Class Win32_OperatingSystem -ErrorA
 $IsLegacy = ($Edition -eq 'legacy') -or (($Edition -eq 'auto') -and ($WinVersion.Major -lt 10))
 $Is64 = [Environment]::Is64BitOperatingSystem
 $UseQuickJs = $IsLegacy
+$OnlyList = @()
+if ($Only) { $OnlyList = @($Only -split '[,; ]+' | Where-Object { $_ }) }
+function Want([string]$id) { return (($OnlyList.Count -eq 0) -or ($OnlyList -contains $id)) }
 $DoWhisper = (-not $SkipWhisper)
 $DoModel = ($DoWhisper -and (-not $SkipModel))
 
@@ -114,6 +122,19 @@ function Expand-Zip([string]$zip, [string]$dest) {
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   if (Test-Path $dest) { Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue }
   [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
+}
+
+# remember which release was installed, so the app can tell when a newer one exists
+function Get-LatestTag([string]$repo) {
+  try { return (Invoke-RestMethod -Uri ("https://api.github.com/repos/$repo/releases/latest") -Headers @{ 'User-Agent' = 'ZephyrPlayer-setup' }).tag_name } catch { return '' }
+}
+function Save-Version([string]$id, [string]$tag) {
+  if ([string]::IsNullOrEmpty($tag)) { return }
+  $f = Join-Path $Root 'tools-versions.json'
+  $h = @{}
+  if (Test-Path $f) { try { $o = Get-Content $f -Raw | ConvertFrom-Json; foreach ($p in $o.PSObject.Properties) { $h[$p.Name] = [string]$p.Value } } catch {} }
+  $h[$id] = $tag
+  try { ($h | ConvertTo-Json) | Set-Content -Path $f -Encoding ASCII } catch {}
 }
 
 function Need([string]$path) { return ($Force -or -not (Test-Path $path)) }
@@ -327,6 +348,7 @@ try {
     # ------------------------------------------------------------------ yt-dlp
     Step 'yt-dlp (YouTube + other sites)'
     Run-Tool 'yt-dlp.exe' {
+      if (-not (Want 'ytdlp')) { return }
       $dest = Join-Path $Root 'yt-dlp.exe'
       if (-not (Need $dest)) { Say '   already present (skipped)'; Record 'yt-dlp.exe' 'present'; return }
       $url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
@@ -335,6 +357,7 @@ try {
       $f = Join-Path $Tmp 'yt-dlp.exe'
       Download $url $f
       Copy-Safe $f $dest
+      Save-Version 'ytdlp' (Get-LatestTag 'yt-dlp/yt-dlp')
       Record 'yt-dlp.exe' 'installed'
     }
 
@@ -342,6 +365,7 @@ try {
     if ($UseQuickJs) {
       Step 'QuickJS (JavaScript runtime yt-dlp needs for YouTube; Deno does not run on Windows 7 / 8 / 8.1)'
       Run-Tool 'qjs.exe' {
+        if (-not (Want 'js')) { return }
         $dest = Join-Path $Root 'qjs.exe'
         if (-not (Need $dest)) { Say '   already present (skipped)'; Record 'qjs.exe' 'present'; return }
         $arch = 'x86_64'
@@ -357,11 +381,13 @@ try {
           if (-not $exe) { throw 'qjs.exe not found inside the archive' }
           Copy-Safe $exe.FullName $dest
         } else { Copy-Safe $f $dest }
+        Save-Version 'quickjs' (Get-LatestTag 'quickjs-ng/quickjs')
         Record 'qjs.exe' 'installed' $asset.name
       }
     } else {
       Step 'deno (JavaScript runtime yt-dlp needs for YouTube)'
       Run-Tool 'deno.exe' {
+        if (-not (Want 'js')) { return }
         $dest = Join-Path $Root 'deno.exe'
         if (-not (Need $dest)) { Say '   already present (skipped)'; Record 'deno.exe' 'present'; return }
         $url = 'https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip'
@@ -373,6 +399,7 @@ try {
         $exe = Find-File $dir 'deno.exe'
         if (-not $exe) { throw 'deno.exe not found inside the archive' }
         Copy-Safe $exe.FullName $dest
+        Save-Version 'deno' (Get-LatestTag 'denoland/deno')
         Record 'deno.exe' 'installed'
       }
     }
@@ -380,6 +407,7 @@ try {
     # ------------------------------------------------------------------ mpv
     Step 'mpv (plays mkv / HEVC / everything)'
     Run-Tool 'mpv.exe' {
+      if (-not (Want 'mpv')) { return }
       $dest = Join-Path $Root 'mpv.exe'
       if (-not (Need $dest)) { Say '   already present (skipped)'; Record 'mpv.exe' 'present'; return }
       # shinchiro builds: plain x86_64 works on every PC (the "-v3" build needs a newer CPU with AVX2)
@@ -403,11 +431,12 @@ try {
         $target = Join-Path $Root $extra
         if ($d -and -not (Test-Path $target)) { Copy-Safe $d.FullName $target }
       }
+      Save-Version 'mpv' (Get-LatestTag 'shinchiro/mpv-winbuild-cmake')
       Record 'mpv.exe' 'installed' $asset.name
     }
 
     # ------------------------------------------------------------------ ffmpeg + ffprobe
-    if (-not $SkipFfmpeg) {
+    if ((-not $SkipFfmpeg) -and (Want 'ffmpeg')) {
       Step 'ffmpeg + ffprobe (file info, poster frames, convert, record, clips)'
       Run-Tool 'ffmpeg' {
         $ff = Join-Path $Root 'ffmpeg\ffmpeg.exe'
@@ -431,12 +460,13 @@ try {
         if (-not $a -or -not $b) { throw 'ffmpeg.exe / ffprobe.exe not found inside the archive' }
         Copy-Safe $a.FullName $ff
         Copy-Safe $b.FullName $fp
-        Record 'ffmpeg + ffprobe' 'installed'
+        Save-Version 'ffmpeg' ''
+      Record 'ffmpeg + ffprobe' 'installed'
       }
     }
 
     # ------------------------------------------------------------------ whisper (local AI subtitles)
-    if ($DoWhisper) {
+    if ($DoWhisper -and (Want 'whisper')) {
       Step 'whisper.cpp (local AI subtitles)'
       Run-Tool 'whisper-cli.exe' {
         $dest = Join-Path $Root 'whisper-cli.exe'
@@ -457,7 +487,8 @@ try {
         if (-not $exe) { throw 'whisper-cli.exe not found inside the archive (the release layout may have changed)' }
         Copy-Safe $exe.FullName $dest
         Get-ChildItem -Path $exe.DirectoryName -Filter '*.dll' -File | ForEach-Object { Copy-Safe $_.FullName (Join-Path $Root $_.Name) }
-        Record 'whisper-cli.exe' 'installed' 'with DLLs'
+        Save-Version 'whisper' (Get-LatestTag 'ggml-org/whisper.cpp')
+      Record 'whisper-cli.exe' 'installed' 'with DLLs'
       }
 
       if ($DoModel) {

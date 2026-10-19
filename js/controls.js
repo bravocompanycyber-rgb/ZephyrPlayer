@@ -57,6 +57,8 @@
     { id: 'settings', group: 'App', label: 'Settings', keys: ['ctrl+,'], run: () => A.openSettings && A.openSettings() },
     { id: 'openFiles', group: 'App', label: 'Open files', keys: ['ctrl+o'], run: () => A.openFilesNative() },
     { id: 'openUrl', group: 'App', label: 'Open a link', keys: ['ctrl+u'], run: () => click('addUrlBtn') },
+    { id: 'jump', group: 'Playback', label: 'Jump to a time…', keys: ['ctrl+g'], run: () => A.openJump && A.openJump() },
+    { id: 'pasteLink', group: 'App', label: 'Open the link in the clipboard', keys: ['ctrl+v'], run: () => A.pasteLink && A.pasteLink() },
     { id: 'stats', group: 'App', label: 'Playback statistics (mpv)', keys: ['shift+i'], run: () => { if (A.isMpv()) A.mpvCmd('script-binding', 'stats/display-stats-toggle'); else needMpv('Statistics'); } }
   ];
   const BY_ID = Object.create(null); ACTIONS.forEach((a) => { BY_ID[a.id] = a; });

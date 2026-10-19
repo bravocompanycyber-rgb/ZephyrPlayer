@@ -1,0 +1,82 @@
+{
+"name": "zephyrplayer-legacy",
+"version": "2.5.0",
+"description": "ZephyrPlayer — Windows 8.1 compatible build",
+"main": "main.js",
+"author": {
+"name": "Bravo Company Cyber",
+"email": "bravocompanycyber@gmail.com"
+},
+"license": "SEE LICENSE.txt",
+"scripts": {
+"start": "electron .",
+"dev": "electron . --enable-logging",
+"pack": "electron-builder --dir",
+"dist": "electron-builder",
+"dist:win": "electron-builder --win"
+},
+"build": {
+"appId": "com.bravocompanycyber.zephyrplayer",
+"productName": "ZephyrPlayer",
+"icon": "assets/icons/zephyrplayer.ico",
+"directories": {
+"output": "dist-legacy"
+},
+"files": [
+"preload.js",
+"css//*",
+"shaders//",
+"mpv-controller.js",
+"package.json",
+"js/**/",
+"main.js",
+"index.html",
+"assets//*",
+"mpv.exe",
+"vulkan-1.dll",
+"whisper-cli.exe",
+"yt-dlp.exe",
+"ggml-base.dll",
+"ggml-cpu-x64.dll",
+"ggml.dll",
+"whisper.dll",
+"ffmpeg//*"
+],
+"win": {
+"icon": "assets/icons/zephyrplayer.ico",
+"artifactName": "ZephyrPlayer-${version}-Windows8.1-${ext}",
+"target": [
+{
+"target": "nsis",
+"arch": [
+"x64"
+]
+},
+{
+"target": "portable",
+"arch": [
+"x64"
+]
+}
+]
+},
+"nsis": {
+"oneClick": false,
+"allowToChangeInstallationDirectory": true,
+"createDesktopShortcut": true,
+"createStartMenuShortcut": true,
+"shortcutName": "ZephyrPlayer",
+"installerIcon": "assets/icons/zephyrplayer.ico",
+"uninstallerIcon": "assets/icons/zephyrplayer.ico",
+"artifactName": "ZephyrPlayer-${version}-Windows8.1-Setup.${ext}"
+},
+"copyright": "Copyright © 2026 Bravo Company Cyber"
+},
+"dependencies": {
+"electron-updater": "^6.8.9"
+},
+"devDependencies": {
+"electron": "22.3.27",
+"electron-builder": "^24.13.3"
+}
+}

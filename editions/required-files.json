@@ -1,0 +1,20 @@
+{
+  "files": [
+    "README.md",
+    "assets/icons/favicon.svg",
+    "assets/icons/play.svg",
+    "assets/icons/zephyrplayer.ico",
+    "css/style.css",
+    "index.html",
+    "js/player.js",
+    "js/subtitle-parser.js",
+    "main.js",
+    "media-utils.js",
+    "mpv-controller.js",
+    "mpv-ipc.js",
+    "mpv-session.js",
+    "preload.js",
+    "setup-tools.ps1",
+    "splash.html"
+  ]
+}

@@ -9,6 +9,14 @@ One code base, two installers:
 
 Electron 23 and newer do not start on Windows 7 / 8 / 8.1, and Electron 22 is the last line that does. That is the only reason for a separate legacy build.
 
+## First: fix the installer file list (one time)
+If an installed app crashes with `Cannot find module`, the installer was built from a `build.files` list that misses newer files. Run:
+
+    node editions/fix-build-files.js            (repairs package.json and package-legacy.json; backups are kept)
+    node editions/fix-build-files.js --check    (only report)
+
+It works out the needed files from the code, adds what is missing, and enables a build-time check that **fails the build** if the finished package lacks a file.
+
 ## Build
     editions\build-edition.bat modern
     editions\build-edition.bat legacy
@@ -31,3 +39,5 @@ You can also run the merge on its own: `node editions/apply-edition.js legacy` a
 * The installer script (`setup-tools.ps1`) and tools sit next to the installed exe. If you install into *Program Files* the in-app tool installer needs permission to write there;
   installing for the current user (the default here) avoids that.
 * Keep legacy and modern update feeds separate if you publish updates, otherwise a legacy PC could be offered a modern build it cannot run.
+
+* The generated `build/installer.nsh` makes the installer ask "already installed, this will UPDATE it" when an older version is present (silent installs just continue).

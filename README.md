@@ -50,12 +50,23 @@ If mpv ever fails or shows no picture, it restarts itself at the same position w
 
 Press **F** (or double-click the video). Everything hides. Then:
 
-* move the mouse to the **bottom**: seek bar and all buttons appear;
+* **move the mouse anywhere**: the seek bar, buttons and title appear (Settings > Video: choose "only at the edges" if you prefer);
+* or move to the **bottom**: seek bar and buttons appear and stay while you are there;
 * to the **right edge**: the playlist slides in (or press **L** to pin it);
 * to the **top**: the title bar.
 
 They hide again a moment after you move away. The cursor hides when idle, and a thin progress line stays at the bottom
 (turn it off in Settings). In the separate mpv window, fullscreen uses mpv's controller instead.
+
+## 4b. Playlist: select, runtime, right-click menu
+
+* **Click** plays. **Ctrl+click** adds or removes items from a selection, **Shift+click** selects a range, **Ctrl+A** selects all, **Esc** clears. The footer shows
+  **how many are selected and their total runtime** (for example `3 selected - 1h 24m`); with nothing selected it shows the runtime of the whole playlist.
+* **Right-click** an item (or the selection): **Play**, **Play next**, **Play similar** (the rest of the same show, artist or folder, queued in order after it),
+  **Open file location**, **Copy file path**, **Details & poster**, **Look up poster & info**, **Remove from playlist**, **Delete file** (Recycle Bin, needs a second click), **Select all**.
+  The **Delete key** only removes items from the playlist, never from disk.
+* **Right-click the picture** for playback options (play/pause, fullscreen, screenshot, bookmark, A-B loop, **Jump to time** (Ctrl+G), subtitles, audio track). It works in fullscreen too.
+* **Ctrl+V** opens a link from your clipboard; you can also drop a link onto the window.
 
 ## 5. Subtitles
 
@@ -189,6 +200,21 @@ Media keys on the keyboard also work. Screenshots go to `Pictures\ZephyrPlayer`.
 can install or update the missing ones, **Run self-test** (encodes, decodes HEVC, starts the GPU renderer, resolves a real YouTube video, transcribes a spoken sentence with whisper) and **Copy diagnostics** (versions, GPU, tool paths, recent log; your user name is removed) for bug reports.
 A small banner appears at start if something essential is missing.
 
+## 10b. Requirements and updates
+
+* **Missing tools:** if mpv, yt-dlp or the JavaScript runtime are missing, a banner lists exactly what is missing and what each is for, with **Download missing**.
+  **Tools & health** shows every tool with its own **Download** / **Update** button and a **Check for updates** button.
+* **Updates:** once a day ZephyrPlayer checks the official release pages for newer mpv, yt-dlp, Deno/QuickJS, FFmpeg and whisper.
+  Settings > File types & players > *Updates for mpv, yt-dlp...*: **tell me** (banner with *Update now*), **update automatically**, or **never**. yt-dlp also updates itself every few days.
+* In the installed app, downloaded tools live in the app's data folder, so **updating ZephyrPlayer never deletes them** and no administrator rights are needed.
+* **Installer update:** running a newer installer over an existing one asks "already installed, this will UPDATE it" and keeps your settings, playlist and tools.
+
+## 10c. Why Task Manager shows several ZephyrPlayer entries
+
+ZephyrPlayer is built on Chromium, which always runs a few helper processes (main, graphics, network, interface) grouped under one app entry. That is normal.
+ZephyrPlayer folds the audio service into the main process to keep it smaller, and mpv appears as one extra process only while a file plays in mpv. Everything closes when you quit.
+A "Cannot find module" error box left open after a failed start can leave helpers behind until you close it.
+
 ## 11. Troubleshooting
 
 | Problem | What to do |
@@ -202,6 +228,7 @@ A small banner appears at start if something essential is missing.
 | AI subtitles do nothing | Run the self-test: it shows whether whisper starts, finds `models\ggml-base.bin`, and what it hears. |
 | No posters | Turn on online info in Settings; check the file name pattern; try Details > Look up again. |
 | A tool shows Missing after installing | Press Re-check; if you copied files by hand keep them in the project root (ffmpeg in `ffmpeg\`). |
+| The installed app shows a "Cannot find module" or "incomplete installation" error | The installer was built with a file list that misses newer files. On the build PC run `node editions/fix-build-files.js` once, then build again. It repairs `package.json` / `package-legacy.json` and adds a build-time check that refuses to produce a broken installer. |
 | Something else | Help > Copy diagnostics and paste it in your report. Logs: File > Open log folder. |
 
 ## 12. Privacy

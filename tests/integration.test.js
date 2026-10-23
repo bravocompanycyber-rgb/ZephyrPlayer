@@ -3,7 +3,7 @@ const H = require('./helpers'); const fs = require('fs'); const path = require('
 const R = (f) => fs.readFileSync(path.join(H.ROOT, f), 'utf8'); const issues = [];
 const check = (name, bad) => { if (bad.length) issues.push(name + ': ' + bad.join(', ')); else console.log('ok  ' + name); };
 const main = R('main.js'), preload = R('preload.js'), html = R('index.html'), css = R('css/style.css');
-const jsNames = ['player', 'features', 'controls', 'settings-ui', 'settings-store', 'icons'];
+const jsNames = ['boot-guard', 'player', 'features', 'controls', 'settings-ui', 'settings-store', 'icons'];
 const allJs = jsNames.map((f) => R('js/' + f + '.js')).join('\n');
 // 1. IPC: preload -> main handlers, main -> preload events
 const handled = new Set([...main.matchAll(/handle\(\s*'([^']+)'/g)].map((m) => m[1]));
@@ -20,7 +20,7 @@ check('every element id the JS looks up exists in index.html', [...new Set([...a
 const scripts = [...html.matchAll(/<script src="([^"]+)"/g)].map((m) => m[1]);
 check('every <script src> exists', scripts.filter((s) => !fs.existsSync(path.join(H.ROOT, s))));
 const at = (a) => scripts.indexOf('js/' + a + '.js');
-check('script order is right', [['settings-store', 'player'], ['player', 'features'], ['features', 'controls'], ['features', 'settings-ui'], ['icons-default', 'icons'], ['icons', 'player']].filter(([a, b]) => at(a) < 0 || at(b) < 0 || at(a) > at(b)).map((p) => p.join(' before ')));
+check('script order is right', [['boot-guard', 'settings-store'], ['settings-store', 'player'], ['player', 'features'], ['features', 'controls'], ['features', 'settings-ui'], ['icons-default', 'icons'], ['icons', 'player']].filter(([a, b]) => at(a) < 0 || at(b) < 0 || at(a) > at(b)).map((p) => p.join(' before ')));
 check('stylesheets exist (favicon.svg is your own file)', [...html.matchAll(/<link[^>]+href="([^"]+)"/g)].map((m) => m[1]).filter((u) => !/^https?:/.test(u) && !/favicon\.svg$/.test(u) && !fs.existsSync(path.join(H.ROOT, u))));
 // 4. icons used by the interface exist as files and as built-in fallbacks
 const defaults = JSON.parse(R('js/icons-default.js').replace(/^[\s\S]*?window\.ZIconDefaults = /, '').replace(/;\s*$/, ''));

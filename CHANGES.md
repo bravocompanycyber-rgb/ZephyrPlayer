@@ -1,40 +1,66 @@
-# ZephyrPlayer upgrade — what changed and how to install
+# ZephyrPlayer upgrade v6
 
-## Install
-Copy these into your project, keeping the folder layout (back up first; keep your old preload.js):
+## Latest: distribution build + self-diagnosing interface
+- `editions/build-release.bat` builds installers FOR OTHER PCs: per-edition tools packed inside (legacy = QuickJS, not Deno), file list checked, `--publish never`, prints exactly which file to copy.
+- If the interface ever fails to start, a red message now appears on screen (and in the log) instead of a window where nothing reacts. **F12** opens developer tools even when buttons are dead.
 
-    main.js, preload.js, mpv-ipc.js, mpv-session.js, media-utils.js, index.html   -> project root
-    js/player.js, js/subtitle-parser.js                                            -> js/
-    css/style.css, mpv-controller.js, package.json                                 -> unchanged
+## v6: crash fix, fullscreen, playlist menu, requirements and updates
+- **Fixes the installer crash** `Cannot find module './mpv-session'`: the installer's `build.files` did not list the new files. (1) The app now checks its own files at start and explains the problem instead of a raw error.
+  (2) `node editions/fix-build-files.js` reads the real code, repairs `package.json` / `package-legacy.json` (your entries are kept, backups made). (3) It also turns on a build-time check (afterPack) that fails the build if the finished package is missing anything.
+- **Fullscreen:** seek bar and buttons appear when the mouse moves (or only at the edges, your choice); the playlist opens from the right edge. **Right-click now works in fullscreen**
+  (the old menu sat inside the controls bar that fullscreen slides away; the new one is attached to the page).
+- **Playlist:** multi-select with total runtime, right-click menu (play, play next, **play similar**, **open file location**, copy path, details, look up, remove, **delete to Recycle Bin**), Ctrl+A, Delete.
+  Jump to time (Ctrl+G), Ctrl+V / drop to open a link, deinterlace and smooth-motion options.
+- **Requirements and updates:** list of what is missing with per-tool Download buttons; daily update check for mpv / yt-dlp / Deno / QuickJS / FFmpeg / whisper (notify or automatic); tools live in the app data folder so installer updates keep them.
+- **Installer:** asks "already installed, this will UPDATE it" when an older version exists (compiled with real NSIS). **Task Manager:** audio service folded into the main process; children are closed on exit.
+- **Design audit:** all 15 themes checked for readable contrast (Light and Sky muted text fixed); icons, CSS variables, IPC channels, element ids and script order cross-checked.
 
-IMPORTANT: if package.json has a `build.files` list, add `mpv-ipc.js`, `mpv-session.js`, `media-utils.js`
-(or use "*.js"), otherwise the packaged app will not find them.
-preload.js was rewritten (your original wasn't in the upload) — if you added custom bridge functions there, re-add them.
+# ZephyrPlayer upgrade v5
 
-## Fixed
-- UI now really controls mpv (play/pause/seek/volume/speed/tracks/chapters/A-B/screenshot) and mirrors mpv state back.
-- No more mpv restarts for EQ, tracks, geometry, video adjust, subtitle style, audio device — all live, position kept.
-- Quality change / crash recovery resume at the same position.
-- Keyboard shortcuts fired twice (M never muted; S, B doubled) — one dispatcher now.
-- Bookmarks used prompt() (unsupported in Electron) — auto-label, double-click to rename.
-- needsMpvContainer was defined twice (everything went to mpv) — single smart routing, HTML5 first for mp4/webm/mp3...
-- Browser engine auto-hands over to mpv on: decode error, unsupported video codec (audio-only playback), unsupported audio codec (silent video), 15s stall.
-- Subtitles: VTT without hours, ASS/SSA, UTF-16/ANSI encodings, overlapping cues, sidecar auto-load, SRT export rounding.
-- Resume positions keyed by full path (same-named files no longer collide), saved every 5 s and on exit.
-- HTML injection through file names / m3u / chapter titles closed (textContent / escaping).
-- Drag & drop of files AND folders (works on Electron >= 32 where File.path was removed).
-- Playlist: shuffle without immediate repeats, Prev = restart/history, bad files skipped on auto-next.
-- m3u: relative paths, file:// URLs, BOM.
+## v5: settings, controls, volume, robustness, editions
+- **Settings centre** (gear / Ctrl+,): nine groups from Basic to Advanced, a hover explanation on every setting, per-setting / per-section / reset-all, search, export / import.
+  Fixes a real bug: skip step, auto-next and remember-position were never saved and reset on every launch. All settings are validated, versioned and corruption-proof.
+- **Keys and mouse**: every shortcut rebindable (capture, conflicts handled), mouse wheel / Shift / Ctrl, click, double-click, middle and thumb buttons configurable; also applied in the mpv window.
+- **Volume**: up to 300% (default limit 200%) with a soft limiter, loudness evening and night mode in one audio chain; the browser engine hands over to mpv for boost.
+- **Hang protection**: frozen mpv detected and restarted at the same position, force-kill when it will not quit, open-timeout, stalled-stream reconnect, safe-mode fallback for bad option typos.
+- **Other players / K-Lite**: detects MPC-HC (K-Lite), MPC-BE, VLC, PotPlayer, KMPlayer and offers or automatically does a hand-over when nothing built-in can play a file. Codec support report.
+- **File associations** written properly (no admin needed) + `.m3u/.m3u8/.pls` open as playlists. (The old .reg export had double-escaped paths: fixed.)
+- **Editions**: Modern and Legacy (Windows 7 / 8 / 8.1, Electron 22.3.27) with a merge tool that never replaces your package.json; setup script works on PowerShell 4 and uses QuickJS on old Windows.
+- Verified: all main-process tests also pass on Node 16; interface code parses as ES2022 and uses no post-Chromium-108 features.
 
-## Crash-proofing
-- mpv exits abnormally -> relaunch at last position, escalating to safer settings (no hwdec, minimal args); bad options can't loop.
-- mpv can't start at all -> browser engine takes over (and vice-versa).
-- Renderer crash/hang -> auto reload; every IPC handler returns {ok:false,error} instead of throwing.
-- No more blocking taskkill/where calls; tool lookups cached; single-instance lock exits cleanly.
-- Hardening: sandbox on, webSecurity on, CSP, permission deny-list, URL scheme checks, mpv command/property whitelist.
+# ZephyrPlayer upgrade v4
 
-## New
-- Real audio/subtitle track names, chapters (PgUp/PgDn), mpv stats (Shift+I), speeds up to 4x, volume boost to 150% (mpv).
-- Window size/position remembered; logs pruned; Whisper progress % + cancel; recording resolves YouTube pages via yt-dlp.
-- Screenshots go to Pictures\ZephyrPlayer for both engines.
-- Embed modes: "Separate window" (default, most robust), "Embedded (beta)" (native child window that follows the app), legacy modes kept.
+## Install (keep folder layout, back up first)
+    root:   main.js preload.js mpv-ipc.js mpv-session.js mpv-controller.js media-utils.js media-probe.js media-tools.js online-meta.js
+            engine-config.js external-players.js file-assoc.js edition.js
+            index.html splash.html setup-tools.ps1 setup-tools.bat README.md TOOLS.md
+    js/:    player.js features.js controls.js settings-store.js settings-ui.js subtitle-parser.js media-name.js icons.js icons-default.js
+    css/:   style.css
+    assets/icons/: all 80 icons + README.md + icon-sheet.html (your own zephyrplayer.ico/tray.png stay untouched)
+    tests/: optional test suite (node tests/run-all.js)
+    editions/: apply-edition.js, fix-build-files.js, after-pack-check.js, build-edition.bat, README.md
+    FIRST, once:  node editions/fix-build-files.js   (repairs the installer file list: this is the crash fix)
+    package.json: if it has build.files, include the new root .js files, splash.html, setup-tools.ps1, README.md, TOOLS.md and assets/**
+
+## Update: tools that are proven, not just present
+- setup-tools.ps1 now installs whisper (exe + DLLs + the base speech model) by default and runs a self-test of every tool:
+  ffmpeg encodes H.264 and 10-bit HEVC+AC3, ffprobe reads them, mpv decodes both and starts its Direct3D 11 GPU renderer,
+  deno runs JS, yt-dlp resolves a real YouTube video with deno, whisper transcribes a spoken sentence (made with the Windows voice).
+  Results are PASS / WARN / FAIL with a reason; exit code 0 / 1 (download failed) / 2 (installed but broken). `-TestOnly` re-runs just the tests.
+- Tools & health got a **Run self-test** button (same tests) and installs whisper by default.
+- mpv.com is installed too so the mpv version can be shown (mpv.exe prints nothing to a console).
+
+## New in v4
+- Fullscreen rebuilt: everything hides; mouse to the BOTTOM shows seek bar + buttons, RIGHT edge shows the playlist (or L), TOP shows the title.
+  (Before, only the video was fullscreen, so controls and playlist were gone.) In the mpv window: bigger on-screen controller, < > and F8 for your playlist.
+- Optional free online posters/covers/info (TVmaze, Apple iTunes, Wikipedia, Deezer, YouTube thumbnails). Off by default, cleaned titles only, cached.
+  Details panel (D), episode titles, plots, ratings, poster-driven accent colour, album art for music.
+- 15 themes + custom/poster accent, splash screen (can be turned off), first-run welcome.
+- Tools & health panel with one-click install, copy-diagnostics, missing-tool banner. Help menu: user guide, shortcuts, tools, diagnostics.
+- A-B clip export (MP4 / lossless copy / GIF) with automatic keyframe check.
+- Per-file memory (audio/subtitle track, speed), Continue-watching shelf, embedded cover art, OS media-overlay metadata.
+- README.md user guide, TOOLS.md, tests.
+
+## Earlier fixes still included
+Blank-screen guard no longer false-triggers on slow YouTube loads (v3), controls/icons/playlist upgrade, shuffle bag, codec-aware routing,
+crash recovery, YouTube JS-runtime + yt-dlp updates, hardened security.

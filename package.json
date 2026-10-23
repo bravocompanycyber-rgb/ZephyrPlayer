@@ -80,7 +80,8 @@
       "THIRD_PARTY_NOTICES.additions.txt",
       "README.md",
       "TOOLS.md",
-      "setup-tools.ps1"
+      "setup-tools.ps1",
+      "tool-updates.js"
     ],
     "extraResources": [
       {

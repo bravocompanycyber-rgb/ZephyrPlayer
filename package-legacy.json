@@ -50,7 +50,15 @@
       "mpv-ipc.js",
       "mpv-session.js",
       "setup-tools.ps1",
-      "splash.html"
+      "splash.html",
+      "edition.js",
+      "engine-config.js",
+      "external-players.js",
+      "file-assoc.js",
+      "media-probe.js",
+      "media-tools.js",
+      "online-meta.js",
+      "tool-updates.js"
     ],
     "win": {
       "icon": "assets/icons/zephyrplayer.ico",

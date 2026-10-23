@@ -17,6 +17,15 @@ If an installed app crashes with `Cannot find module`, the installer was built f
 
 It works out the needed files from the code, adds what is missing, and enables a build-time check that **fails the build** if the finished package lacks a file.
 
+## Build a release for OTHER computers (use this, not a test run)
+    editions\build-release.bat              both editions
+    editions\build-release.bat legacy       Windows 7 / 8 / 8.1 only
+    editions\build-release.bat modern       Windows 10 / 11 only
+
+It fetches the right tools for each edition (the legacy one gets QuickJS, because Deno does not run on Windows 8.1), repairs the installer file list,
+builds an installer and a portable .exe with `--publish never`, and prints the file to copy. **Copy the "Setup" .exe from `dist\legacy` or `dist\modern` to the other PC.**
+Do not copy the `win-unpacked` folder or the `.blockmap` / `.yml` files. `npm start` and the unpacked folder are for testing on your own PC only.
+
 ## Build
     editions\build-edition.bat modern
     editions\build-edition.bat legacy

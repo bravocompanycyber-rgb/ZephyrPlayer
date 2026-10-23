@@ -1,0 +1,1 @@
+Tools for the legacy edition are placed here by editions/build-release.bat and packed next to the exe.

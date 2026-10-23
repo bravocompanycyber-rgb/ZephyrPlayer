@@ -129,4 +129,38 @@ async function codecReport(ffmpegPath) {
   return rep;
 }
 
-module.exports = { codecReport, parseDecoders, CODEC_LIST, buildClipArgs, exportClip, findPrevKeyframe, clipName, getVersion, buildDiagnostics };
+/* ---- "Fix sound": keep the video stream as it is, convert only the audio to AAC so the built-in player can play it ---- */
+function fixAudioArgs({ input, out }) {
+  return ['-v', 'error', '-y', '-nostdin', '-progress', 'pipe:1', '-nostats', '-i', input,
+    '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '256k', '-ac', '6', '-sn', '-dn', '-movflags', '+faststart', out]
+    .map((x) => x);   // 6 channels at most: stereo stays stereo, 5.1 stays 5.1 (the OS mixes it down for your speakers)
+}
+function fixAudio(ffmpegPath, { input, out, duration, onProgress }) {
+  return new Promise((resolve) => {
+    if (!ffmpegPath) { resolve({ ok: false, error: 'ffmpeg not found (Tools & health can download it)' }); return; }
+    if (!input || !fs.existsSync(input)) { resolve({ ok: false, error: 'Source file not found' }); return; }
+    const { spawn } = require('child_process');
+    let child; let err = ''; let buf = '';
+    try { child = spawn(ffmpegPath, fixAudioArgs({ input, out }), { windowsHide: true }); } catch (e) { resolve({ ok: false, error: e.message }); return; }
+    const timer = setTimeout(() => { try { child.kill(); } catch {} }, 45 * 60 * 1000);
+    child.stdout.on('data', (d) => {
+      buf += d.toString();
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+        const m = /^out_time_(?:us|ms)=(\d+)/.exec(line);
+        if (m && duration > 0 && onProgress) onProgress(Math.max(0, Math.min(99, Math.round(Number(m[1]) / 1e6 / duration * 100))));
+      }
+    });
+    child.stderr.on('data', (d) => { err = (err + d.toString()).slice(-600); });
+    child.once('error', (e) => { clearTimeout(timer); resolve({ ok: false, error: e.message }); });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      let size = 0; try { size = fs.statSync(out).size; } catch {}
+      if (code === 0 && size > 1000) { if (onProgress) onProgress(100); resolve({ ok: true, path: out, size }); }
+      else { try { fs.unlinkSync(out); } catch {} resolve({ ok: false, error: (err.trim().split(/\r?\n/).pop() || 'ffmpeg failed (exit ' + code + ')').slice(0, 300) }); }
+    });
+  });
+}
+
+module.exports = { fixAudio, fixAudioArgs, codecReport, parseDecoders, CODEC_LIST, buildClipArgs, exportClip, findPrevKeyframe, clipName, getVersion, buildDiagnostics };

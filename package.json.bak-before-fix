@@ -79,13 +79,17 @@
       "THIRD_PARTY_NOTICES.txt",
       "THIRD_PARTY_NOTICES.additions.txt",
       "README.md",
-      "TOOLS.md"
+      "TOOLS.md",
+      "setup-tools.ps1",
+      "tool-updates.js"
     ],
     "extraResources": [
       {
         "from": "models",
         "to": "models",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {
@@ -93,11 +97,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "artifactName": "ZephyrPlayer-${version}-Windows10+-${ext}",

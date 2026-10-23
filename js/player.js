@@ -68,9 +68,15 @@
   let shuffle = false;
   let abLoop = { a: null, b: null, active: false };
   let externalSubs = [];
-  let seekStep = 10;
-  let autoNext = true;
-  let rememberPos = true;
+  const Z = window.ZSettings || { get: (id) => undefined, on: () => {}, set: () => {} };
+  const pref = (id, d) => { const v = Z.get(id); return v === undefined ? d : v; };
+  let seekStep = pref('seekStep', 10);
+  let seekStepBig = pref('seekStepBig', 30);
+  let autoNext = pref('autoNext', true);
+  let rememberPos = pref('rememberPos', true);
+  let skipBad = pref('skipBad', true);
+  let volumeMax = pref('volumeMax', 200) / 100;       // 1.0 = 100%
+  let volumeStep = pref('volumeStep', 5) / 100;
   let osdTimer = null;
 
   // Utils
@@ -131,7 +137,6 @@
   let volumeLevel = 1;
   let userMuted = false;
   let speedRate = 1;
-  const history = [];
   const mp = { active: false, time: 0, duration: 0, paused: true, eof: false, tracks: [] };
 
   const isMpv = () => engine === 'mpv';
@@ -150,16 +155,120 @@
     return a.mpvSetProps({ [name]: value }).catch(() => ({ ok: false }));
   }
 
+  const history = [];   // items (not indices) so reordering/sorting can never break "previous"
+  const playedSet = new Set();   // shuffle: items already played in the current cycle
+  const selection = new Set();          // playlist items the user has selected (Ctrl / Shift click, Ctrl+A)
+  let lastSelected = null;
+  const plFilterEl = document.getElementById('plFilter');
+  const plSortEl = document.getElementById('plSort');
+  let plFilter = '';
+  let dragItem = null;
+
+  const BROWSER_V = new Set(['h264', 'vp8', 'vp9', 'av1', 'theora']);
+  const BROWSER_A = new Set(['aac', 'mp3', 'opus', 'vorbis', 'flac', 'pcm_s16le', 'pcm_s24le', 'pcm_u8', 'pcm_f32le']);
+  // Does the browser engine decode this? (HEVC/x265, AC3/DTS, MPEG-2, VC-1... it does not -> mpv straight away)
+  function browserCanPlay(info) {
+    if (!info) return true;
+    if (info.vcodec && info.hasVideo && !BROWSER_V.has(info.vcodec)) return false;
+    if (info.acodec && !BROWSER_A.has(info.acodec)) return false;
+    if (info.bitDepth > 8 && info.hasVideo) return false;       // 10-bit H.264 is not hardware/browser friendly
+    return true;
+  }
+  const itemDuration = (it) => (it.info && it.info.duration) || it.duration || 0;
+
   function makeItem(m) {
     const fullName = m.name || String(m.path).split(/[/\\]/).pop();
     return {
-      name: fullName.replace(/\.[^/.]+$/, ''), fullName, size: m.size || 0, type: '',
-      path: m.path, url: pathToFileUrl(m.path), subPath: m.subPath || null
+      name: m.title || fullName.replace(/\.[^/.]+$/, ''), fullName, size: m.size || 0, type: '',
+      path: m.path, url: pathToFileUrl(m.path), subPath: m.subPath || null, addedAt: Date.now()
     };
   }
-  function makeStreamItem(url, title) {
+  function makeStreamItem(url, title, duration) {
     const label = title || (url.length > 70 ? url.slice(0, 67) + '…' : url);
-    return { name: label, fullName: url, size: 0, type: '', path: null, url, stream: true };
+    return { name: label, fullName: url, size: 0, type: '', path: null, url, stream: true, duration: duration || 0, addedAt: Date.now() };
+  }
+
+  // ------------------------------------------------------- probing (duration, codecs, tracks, posters)
+  let pActive = 0; const pQueue = [];
+  function limited(fn, max) {
+    return new Promise((resolve) => {
+      const run = () => { pActive++; fn().catch(() => null).then((r) => { pActive--; resolve(r); const n = pQueue.shift(); if (n) n(); }); };
+      if (pActive < max) run(); else pQueue.push(run);
+    });
+  }
+  function applyInfo(item, info) {
+    item.info = info;
+    if (!item.size && info.size) item.size = info.size;
+    if (!browserCanPlay(info)) item.forceMpv = true;
+    if (!info.hasVideo && info.title && !item._renamed) {
+      item.name = (info.artist ? info.artist + ' – ' : '') + info.title;      // music: tags beat file names
+    }
+    updateRow(item);
+    if (playlist[currentIndex] === item) { videoTitle.textContent = item.name; }
+    savePlaylistSoon();
+  }
+  function probeItem(item) {
+    const a = api();
+    if (item.info) return Promise.resolve(item.info);
+    if (item._probe) return item._probe;
+    if (!item.path || !a || !a.probeMedia) return Promise.resolve(null);
+    item._probe = limited(async () => {
+      const info = await a.probeMedia(item.path);
+      if (info && info.ok) applyInfo(item, info);
+      else if (info && info.error === 'missing') { item.missing = true; updateRow(item); }
+      return item.info || null;
+    }, 4).then((r) => { item._probe = null; return r; });
+    return item._probe;
+  }
+  let tActive = 0; const tQueue = [];
+  function queueThumb(item) {
+    const a = api();
+    if (item.thumb || item._thumbing || !item.path || !a || !a.thumbMedia || !(item.info && (item.info.hasVideo || item.info.hasCover))) return;
+    item._thumbing = true;
+    const run = async () => {
+      tActive++;
+      try {
+        const r = await a.thumbMedia(item.path, itemDuration(item), !item.info.hasVideo);
+        if (r && r.ok && r.path) { item.thumb = pathToFileUrl(r.path); updateRow(item); }
+      } catch {}
+      tActive--; item._thumbing = false;
+      const n = tQueue.shift(); if (n) n();
+    };
+    if (tActive < 2) run(); else tQueue.push(run);
+  }
+  const thumbObserver = typeof IntersectionObserver !== 'undefined'
+    ? new IntersectionObserver((entries) => entries.forEach((en) => {
+      if (en.isIntersecting && en.target._item) { thumbObserver.unobserve(en.target); queueThumb(en.target._item); }
+    }), { root: playlistEl, rootMargin: '240px' })
+    : null;
+
+  // ------------------------------------------------------- playlist persistence (restored on next launch)
+  let saveTimer = null;
+  function savePlaylistSoon() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      try {
+        const cur = playlist[currentIndex];
+        lsSet('zephyr-playlist-v1', JSON.stringify({
+          cur: cur ? (cur.path || cur.url) : null,
+          items: playlist.slice(0, 1500).map((it) => ({ p: it.path || null, u: it.stream ? it.url : null, n: it.name, d: Math.round(itemDuration(it)) }))
+        }));
+      } catch {}
+    }, 600);
+  }
+  function restorePlaylist() {
+    if (!pref('restorePlaylist', true)) return;
+    let saved;
+    try { saved = JSON.parse(lsGet('zephyr-playlist-v1') || 'null'); } catch { saved = null; }
+    if (!saved || !Array.isArray(saved.items) || !saved.items.length || playlist.length) return;
+    for (const s of saved.items) {
+      if (s.u) playlist.push(makeStreamItem(s.u, s.n, s.d));
+      else if (s.p) { const it = makeItem({ path: s.p, name: String(s.p).split(/[/\\]/).pop() }); if (s.n) it.name = s.n; if (s.d) it.duration = s.d; playlist.push(it); }
+    }
+    const idx = playlist.findIndex((it) => (it.path || it.url) === saved.cur);
+    if (idx >= 0) { currentIndex = idx; videoTitle.textContent = playlist[idx].name; videoSubtitle.textContent = 'Press play to continue where you left off'; }
+    renderPlaylist();
+    playlist.forEach((it) => { probeItem(it); });
   }
 
   // ---------------------------------------------------------------- playlist
@@ -175,7 +284,7 @@
       /\.(mp3|flac|wav|aac|m4a|opus|ogg|oga)$/i.test(f.name || '')));
     media.forEach(file => playlist.push({
       name: file.name.replace(/\.[^/.]+$/, ''), fullName: file.name, url: URL.createObjectURL(file),
-      size: file.size, type: file.type || '', path: null
+      size: file.size, type: file.type || '', path: null, addedAt: Date.now()
     }));
     if (subs.length && playlist.length) loadExternalSub(subs[0]);
     renderPlaylist();
@@ -186,61 +295,293 @@
     const a = api();
     paths = (paths || []).filter(p => typeof p === 'string' && p);
     if (!paths.length) return;
-    let media = [], subs = [];
+    let media = [], subs = [], streams = [];
     if (a && a.expandPaths) {
       const r = await a.expandPaths(paths).catch(() => null);
-      if (r) { media = r.media || []; subs = r.subs || []; }
+      if (r) { media = r.media || []; subs = r.subs || []; streams = r.streams || []; }
     } else {
       media = paths.map(p => ({ path: p, name: p.split(/[/\\]/).pop(), size: 0 }));
     }
-    if (!media.length && !subs.length) { showOSD('No playable media found'); return; }
+    if (!media.length && !subs.length && !streams.length) { showOSD('No playable media found'); return; }
+    // links found in playlist files (.m3u / .pls) or dropped as text
+    let firstStream = -1;
+    for (const st of streams) {
+      if (playlist.some((i) => i.stream && i.url === st.url)) continue;
+      playlist.push(makeStreamItem(st.url, st.title && st.title !== st.url ? st.title : ''));
+      if (firstStream < 0) firstStream = playlist.length - 1;
+    }
 
     const byPath = new Map(playlist.map((it, i) => [it.path, i]));
     let firstIdx = -1;
+    const fresh = [];
     media.forEach((m, n) => {
       if (byPath.has(m.path)) { if (firstIdx < 0) firstIdx = byPath.get(m.path); return; }
       const item = makeItem(m);
       if (n === 0 && subs.length) item.subPath = subs[0];
       playlist.push(item);
+      fresh.push(item);
       byPath.set(m.path, playlist.length - 1);
       if (firstIdx < 0) firstIdx = playlist.length - 1;
     });
     renderPlaylist();
+    fresh.forEach(probeItem);                       // durations / codecs / posters fill in as they are read
     if (!media.length && subs.length) { loadSubFromPath(subs[0]); return; }
     if (media.length > 1) showOSD(media.length + ' files added');
+    if (firstIdx < 0 && firstStream >= 0) firstIdx = firstStream;
+    if (streams.length) { renderPlaylist(); if (streams.length > 1) showOSD(streams.length + ' links added'); }
     if (firstIdx >= 0 && (opts.play || currentIndex === -1)) playIndex(firstIdx);
+    savePlaylistSoon();
+  }
+
+  // ---- row rendering
+  const CODEC_NAMES = { hevc: 'HEVC', h264: 'H.264', av1: 'AV1', vp9: 'VP9', vp8: 'VP8', mpeg2video: 'MPEG-2', mpeg4: 'MPEG-4', vc1: 'VC-1', wmv3: 'WMV',
+    aac: 'AAC', ac3: 'AC3', eac3: 'E-AC3', dts: 'DTS', truehd: 'TrueHD', flac: 'FLAC', mp3: 'MP3', opus: 'Opus', vorbis: 'Vorbis', alac: 'ALAC', pcm_s16le: 'PCM', wmav2: 'WMA' };
+  const codecName = (c) => CODEC_NAMES[c] || String(c || '').toUpperCase();
+  function resLabel(i) {
+    const h = Math.max(i.height || 0, Math.round((i.width || 0) * 9 / 16));
+    return h >= 2000 ? '4K' : h >= 1400 ? '1440p' : h >= 1000 ? '1080p' : h >= 700 ? '720p' : h >= 460 ? '480p' : (i.height ? i.height + 'p' : '');
+  }
+  function metaParts(item) {
+    const parts = [];
+    const i = item.info;
+    if (item.missing) return ['File not found'];
+    if (item.stream) parts.push('Stream');
+    if (i) {
+      if (i.hasVideo) { const r = resLabel(i); if (r) parts.push(r); if (i.vcodec) parts.push(codecName(i.vcodec)); if (i.bitDepth >= 10) parts.push('10-bit'); if (i.hdr) parts.push(i.hdr); }
+      else if (i.acodec) parts.push(codecName(i.acodec));
+      if (i.audioTracks > 1) parts.push(i.audioTracks + ' audio');
+      if (i.subTracks) parts.push(i.subTracks + ' subs');
+    }
+    if (item.size) parts.push(formatSize(item.size));
+    return parts;
+  }
+
+  function buildRow(item, i) {
+    const li = document.createElement('li');
+    li.className = 'playlist-item' + (i === currentIndex ? ' active' : '') + (item.missing ? ' missing' : '') + (selection.has(item) ? ' selected' : '');
+    li._item = item;
+    li.draggable = !plFilter;
+    const idx = document.createElement('span'); idx.className = 'index'; idx.textContent = String(i + 1);
+    const th = document.createElement('div'); th.className = 'thumb';
+    const artUrl = (window.ZApp && window.ZApp.artFor) ? window.ZApp.artFor(item) : item.thumb;
+    if (artUrl) { const img = document.createElement('img'); img.src = artUrl; img.alt = ''; img.loading = 'lazy'; th.appendChild(img); }
+    else th.appendChild(window.ZIcons ? window.ZIcons.make(item.stream ? 'network' : (item.info && !item.info.hasVideo ? 'music' : 'film')) : document.createTextNode(''));
+    const dur = itemDuration(item);
+    if (dur > 0) { const b = document.createElement('span'); b.className = 'dur'; b.textContent = formatTime(dur); th.appendChild(b); }
+    const info = document.createElement('div'); info.className = 'info';
+    const nm = document.createElement('div'); nm.className = 'name'; nm.textContent = item.name; nm.title = item.fullName;
+    const meta = document.createElement('div'); meta.className = 'meta';
+    metaParts(item).forEach((t, n) => { const s = document.createElement('span'); s.className = 'chip' + (n === 0 && item.missing ? ' bad' : ''); s.textContent = t; meta.appendChild(s); });
+    info.append(nm, meta);
+    const rm = document.createElement('button'); rm.className = 'remove'; rm.title = 'Remove'; rm.appendChild(window.ZIcons ? window.ZIcons.make('close') : document.createTextNode('✕'));
+    const pb = document.createElement('div'); pb.className = 'pbar';
+    const pf = document.createElement('i'); pb.appendChild(pf);
+    const saved = getSavedPos(item);
+    pf.style.width = dur > 0 && saved > 0 ? Math.min(100, saved / dur * 100) + '%' : '0%';
+    li.append(idx, th, info, rm, pb);
+
+    li.addEventListener('click', e => {
+      if (e.target.closest('.remove')) return;
+      if (e.ctrlKey || e.metaKey) { toggleSelected(item); return; }                 // Ctrl+click: add / remove from the selection
+      if (e.shiftKey && lastSelected) { selectRange(lastSelected, item); return; }   // Shift+click: everything in between
+      clearSelection(true);
+      playIndex(playlist.indexOf(item));
+    });
+    li.addEventListener('contextmenu', e => {
+      e.preventDefault(); e.stopPropagation();
+      if (!selection.has(item)) { selection.clear(); selection.add(item); lastSelected = item; refreshSelectionUI(); }
+      if (window.ZApp) window.ZApp.emit('plctx', e.clientX, e.clientY, selectedItems());
+    });
+    rm.addEventListener('click', e => { e.stopPropagation(); removeIndex(playlist.indexOf(item)); });
+
+    li.addEventListener('dragstart', e => {
+      if (plFilter) { e.preventDefault(); return; }
+      dragItem = item; li.classList.add('dragging');
+      try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', 'zephyr-item'); } catch {}
+    });
+    li.addEventListener('dragend', () => { dragItem = null; li.classList.remove('dragging'); playlistEl.querySelectorAll('.drop-before,.drop-after').forEach(x => x.classList.remove('drop-before', 'drop-after')); });
+    li.addEventListener('dragover', e => {
+      if (!dragItem || dragItem === item) return;
+      e.preventDefault();
+      const r = li.getBoundingClientRect(); const before = e.clientY < r.top + r.height / 2;
+      li.classList.toggle('drop-before', before); li.classList.toggle('drop-after', !before);
+    });
+    li.addEventListener('dragleave', () => li.classList.remove('drop-before', 'drop-after'));
+    li.addEventListener('drop', e => {
+      if (!dragItem) return;
+      e.preventDefault(); e.stopPropagation();
+      const r = li.getBoundingClientRect(); const before = e.clientY < r.top + r.height / 2;
+      moveItem(dragItem, item, before);
+      dragItem = null;
+    });
+
+    if (!item.thumb && item.info && (item.info.hasVideo || item.info.hasCover)) { if (thumbObserver) thumbObserver.observe(li); else queueThumb(item); }
+    return li;
+  }
+
+  function matchesFilter(item) {
+    if (!plFilter) return true;
+    return (item.name + ' ' + item.fullName).toLowerCase().includes(plFilter);
+  }
+
+  function runtimeLabel(items) {
+    const total = items.reduce((s, it) => s + itemDuration(it), 0);
+    const known = items.filter(it => itemDuration(it) > 0).length;
+    if (total <= 0) return '';
+    const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), sec = Math.round(total % 60);
+    const txt = h >= 1 ? h + 'h ' + String(m).padStart(2, '0') + 'm' + (items.length <= 12 ? ' ' + String(sec).padStart(2, '0') + 's' : '') : (m >= 1 ? m + 'm ' + String(sec).padStart(2, '0') + 's' : sec + 's');
+    return txt + (known < items.length ? '+' : '');
+  }
+  function updateFooter() {
+    const sel = selectedItems();
+    if (sel.length) {
+      const rt = runtimeLabel(sel);
+      trackCount.textContent = `${sel.length} selected${rt ? ' · ' + rt : ''}  (of ${playlist.length})`;
+      return;
+    }
+    const rt = runtimeLabel(playlist);
+    trackCount.textContent = `${playlist.length} track${playlist.length !== 1 ? 's' : ''}${rt ? ' · ' + rt : ''}`;
+  }
+
+  function selectedItems() { return playlist.filter((it) => selection.has(it)); }
+  function refreshSelectionUI() {
+    playlistEl.querySelectorAll('.playlist-item').forEach((li) => li.classList.toggle('selected', !!(li._item && selection.has(li._item))));
+    updateFooter();
+  }
+  function toggleSelected(item) { if (selection.has(item)) selection.delete(item); else selection.add(item); lastSelected = item; refreshSelectionUI(); }
+  function selectRange(a, b) {
+    const i = playlist.indexOf(a), j = playlist.indexOf(b); if (i < 0 || j < 0) return;
+    selection.clear(); for (let k = Math.min(i, j); k <= Math.max(i, j); k++) selection.add(playlist[k]);
+    refreshSelectionUI();
+  }
+  function clearSelection(quiet) { selection.clear(); lastSelected = null; if (!quiet) refreshSelectionUI(); else playlistEl.querySelectorAll('.playlist-item.selected').forEach((li) => li.classList.remove('selected')); }
+  function selectAll() { playlist.forEach((it) => { if (matchesFilter(it)) selection.add(it); }); refreshSelectionUI(); }
+
+  function removeItems(items) {
+    items = items.filter((it) => playlist.includes(it));
+    if (!items.length) return;
+    const set = new Set(items);
+    const orig = playlist.slice();
+    const cur = playlist[currentIndex];
+    const oldIdx = currentIndex;
+    const removingCurrent = !!cur && set.has(cur);
+    items.forEach((it) => { if (it.url && it.url.startsWith('blob:')) URL.revokeObjectURL(it.url); selection.delete(it); playedSet.delete(it); });
+    for (let h = history.length - 1; h >= 0; h--) if (set.has(history[h])) history.splice(h, 1);
+    playlist = playlist.filter((it) => !set.has(it));
+    if (removingCurrent) {
+      currentIndex = -1;
+      if (playlist.length) {
+        const removedBefore = items.filter((it) => orig.indexOf(it) < oldIdx).length;      // the item that followed the removed one plays next
+        renderPlaylist();
+        playIndex(Math.max(0, Math.min(oldIdx - removedBefore, playlist.length - 1)), { noHistory: true });
+        savePlaylistSoon();
+        return;
+      }
+      resetPlayer();
+    } else currentIndex = cur ? playlist.indexOf(cur) : -1;
+    renderPlaylist(); savePlaylistSoon();
+  }
+
+  // move items to sit right after the one that is playing ("Play next")
+  function queueNext(items) {
+    const cur = playlist[currentIndex];
+    items = items.filter((it) => playlist.includes(it) && it !== cur);
+    if (!items.length) return 0;
+    const set = new Set(items);
+    playlist = playlist.filter((it) => !set.has(it));
+    const at = cur ? playlist.indexOf(cur) + 1 : 0;
+    playlist.splice(at, 0, ...items);
+    currentIndex = cur ? playlist.indexOf(cur) : -1;
+    renderPlaylist(); savePlaylistSoon();
+    return items.length;
   }
 
   function renderPlaylist() {
+    const keepScroll = playlistEl.scrollTop;
     playlistEl.textContent = '';
     if (!playlist.length) {
       const li = document.createElement('li');
       li.className = 'playlist-empty';
-      li.append('No media yet.', document.createElement('br'), 'Open files or drop them here.');
+      li.append('No media yet.', document.createElement('br'), 'Open files, drop media or paste a link.');
       playlistEl.appendChild(li);
       trackCount.textContent = '0 tracks';
       return;
     }
     const frag = document.createDocumentFragment();
+    let shown = 0;
     playlist.forEach((item, i) => {
-      const li = document.createElement('li');
-      li.className = 'playlist-item' + (i === currentIndex ? ' active' : '');
-      const idx = document.createElement('span'); idx.className = 'index'; idx.textContent = String(i + 1);
-      const info = document.createElement('div'); info.className = 'info';
-      const nm = document.createElement('div'); nm.className = 'name'; nm.textContent = item.name; nm.title = item.fullName;
-      const meta = document.createElement('div'); meta.className = 'meta';
-      meta.textContent = item.stream ? 'Stream' : formatSize(item.size);
-      info.append(nm, meta);
-      const rm = document.createElement('button'); rm.className = 'remove'; rm.dataset.i = String(i); rm.textContent = '✕';
-      li.append(idx, info, rm);
-      li.addEventListener('click', e => { if (!e.target.closest('.remove')) playIndex(i); });
-      rm.addEventListener('click', e => { e.stopPropagation(); removeIndex(i); });
+      if (!matchesFilter(item)) { item._row = null; return; }
+      const li = buildRow(item, i);
+      item._row = li; shown++;
       frag.appendChild(li);
     });
+    if (!shown) { const li = document.createElement('li'); li.className = 'playlist-empty'; li.textContent = 'Nothing matches "' + plFilter + '"'; frag.appendChild(li); }
     playlistEl.appendChild(frag);
-    trackCount.textContent = `${playlist.length} track${playlist.length !== 1 ? 's' : ''}`;
-    const active = playlistEl.querySelector('.playlist-item.active');
-    if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest' });
+    updateFooter();
+    if (selection.size) playlistEl.scrollTop = keepScroll;
+    else { const active = playlistEl.querySelector('.playlist-item.active'); if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest' }); }
+  }
+
+  function updateRow(item) {
+    const i = playlist.indexOf(item);
+    if (i < 0) return;
+    if (item._row && item._row.parentNode) {
+      const li = buildRow(item, i);
+      item._row.replaceWith(li);
+      item._row = li;
+    }
+    updateFooter();
+  }
+  function updateRowProgress(item) {
+    if (!item || !item._row) return;
+    const pf = item._row.querySelector('.pbar i'); if (!pf) return;
+    const d = itemDuration(item), s = getSavedPos(item);
+    pf.style.width = d > 0 && s > 0 ? Math.min(100, s / d * 100) + '%' : '0%';
+  }
+
+  function moveItem(item, target, before) {
+    const cur = playlist[currentIndex];
+    const from = playlist.indexOf(item);
+    if (from < 0) return;
+    playlist.splice(from, 1);
+    let to = playlist.indexOf(target);
+    if (to < 0) to = playlist.length;
+    playlist.splice(before ? to : to + 1, 0, item);
+    currentIndex = cur ? playlist.indexOf(cur) : -1;
+    renderPlaylist();
+    savePlaylistSoon();
+  }
+
+  function sortPlaylist(mode) {
+    if (!mode || !playlist.length) return;
+    const cur = playlist[currentIndex];
+    const by = (f, dir = 1) => (a, b) => dir * (f(a) < f(b) ? -1 : f(a) > f(b) ? 1 : 0);
+    const nat = (a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' });
+    let label = '';
+    switch (mode) {
+      case 'name': playlist.sort(nat); label = 'name'; break;
+      case 'name-desc': playlist.sort((a, b) => -nat(a, b)); label = 'name (Z→A)'; break;
+      case 'dur': playlist.sort(by(itemDuration)); label = 'shortest first'; break;
+      case 'dur-desc': playlist.sort(by(itemDuration, -1)); label = 'longest first'; break;
+      case 'size-desc': playlist.sort(by((x) => x.size || 0, -1)); label = 'largest first'; break;
+      case 'added': playlist.sort(by((x) => x.addedAt || 0)); label = 'order added'; break;
+      case 'random':
+        for (let i = playlist.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [playlist[i], playlist[j]] = [playlist[j], playlist[i]]; }
+        label = 'random'; break;
+      case 'dedupe': {
+        const seen = new Set(); const before = playlist.length;
+        playlist = playlist.filter((it) => { const k = (it.path || it.url || '').toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+        showOSD(before - playlist.length + ' duplicate(s) removed'); label = null; break;
+      }
+      case 'missing': {
+        const before = playlist.length; playlist = playlist.filter((it) => !it.missing);
+        showOSD(before - playlist.length + ' missing file(s) removed'); label = null; break;
+      }
+    }
+    currentIndex = cur ? playlist.indexOf(cur) : -1;
+    if (label) showOSD('Sorted: ' + label);
+    renderPlaylist();
+    savePlaylistSoon();
   }
 
   function removeIndex(i) {
@@ -248,13 +589,15 @@
     if (!it) return;
     if (it.url && it.url.startsWith('blob:')) URL.revokeObjectURL(it.url);
     playlist.splice(i, 1);
-    for (let h = history.length - 1; h >= 0; h--) { if (history[h] === i) history.splice(h, 1); else if (history[h] > i) history[h]--; }
+    for (let h = history.length - 1; h >= 0; h--) if (history[h] === it) history.splice(h, 1);
+    playedSet.delete(it);
     if (currentIndex === i) {
       currentIndex = -1;
       if (playlist.length) playIndex(Math.min(i, playlist.length - 1), { noHistory: true });
       else resetPlayer();
     } else if (currentIndex > i) currentIndex--;
     renderPlaylist();
+    savePlaylistSoon();
   }
 
   function clearPlaylist() {
@@ -262,9 +605,24 @@
     playlist = [];
     currentIndex = -1;
     history.length = 0;
+    playedSet.clear();
+    selection.clear(); lastSelected = null;
     resetPlayer();
     renderPlaylist();
+    lsDel('zephyr-playlist-v1');
   }
+
+  playlistEl.tabIndex = 0;
+  playlistEl.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    const k = e.key;
+    if ((e.ctrlKey || e.metaKey) && (k === 'a' || k === 'A')) { e.preventDefault(); selectAll(); }
+    else if ((k === 'Delete' || k === 'Backspace') && selection.size) { e.preventDefault(); removeItems(selectedItems()); showOSD('Removed from the playlist (the files are untouched)', 1800); }
+    else if (k === 'Enter' && selection.size) { e.preventDefault(); const it = selectedItems()[0]; clearSelection(true); playIndex(playlist.indexOf(it)); }
+    else if (k === 'Escape' && selection.size) { e.stopPropagation(); clearSelection(); }
+  });
+  if (plFilterEl) plFilterEl.addEventListener('input', () => { plFilter = plFilterEl.value.trim().toLowerCase(); renderPlaylist(); });
+  if (plSortEl) plSortEl.addEventListener('change', () => { const m = plSortEl.value; plSortEl.value = ''; sortPlaylist(m); });
 
   function resetPlayer() {
     loadToken++;
@@ -287,6 +645,7 @@
     currentTimeEl.textContent = '0:00';
     durationEl.textContent = '0:00';
     if (api() && api().reportProgress) api().reportProgress(-1);
+    if (window.ZApp) window.ZApp.emit('idle');
   }
 
   // ------------------------------------------------------- resume positions
@@ -296,7 +655,9 @@
     if (!item || !hasMedia()) return;
     const t = curTime(), d = curDur();
     if (!(d > 0)) return;
+    if (window.ZApp) window.ZApp.emit('position', item, t, d);
     if (t > 5 && t < d - 8) {
+      updateRowProgress(item);
       lsSet(posKey(item), String(Math.floor(t)));
       lsSet('zephyr-pos-' + item.fullName, String(Math.floor(t))); // legacy key: library "watched %"
     } else if (t >= d - 8) {
@@ -319,22 +680,18 @@
     return 'html5';
   }
 
-  function resetAB() {
-    abLoop = { a: null, b: null, active: false };
-    abLoopBtn.classList.remove('active');
-    abLoopBtn.textContent = 'A-B';
-    abRange.hidden = true;
-  }
-
   function playIndex(i, opts = {}) {
     if (i < 0 || i >= playlist.length) return;
     savePosition();
-    if (currentIndex >= 0 && currentIndex !== i && !opts.noHistory) {
-      history.push(currentIndex);
+    const prev = playlist[currentIndex];
+    if (prev) updateRowProgress(prev);
+    const item = playlist[i];
+    if (prev && prev !== item && !opts.noHistory) {
+      history.push(prev);
       if (history.length > 100) history.shift();
     }
     currentIndex = i;
-    const item = playlist[i];
+    if (shuffle) playedSet.add(item);
     item._triedMpv = false;
     item._audioChecked = false;
     const token = ++loadToken;
@@ -348,11 +705,34 @@
     dropZone.classList.add('hidden');
     bigPlay.hidden = true;
     renderPlaylist();
+    savePlaylistSoon();
+    if (window.ZApp) window.ZApp.emit('itemstart', item);
     if (item.path && api() && api().recordOpened) api().recordOpened(item.path);
 
     const start = opts.startPos != null ? opts.startPos : getSavedPos(item);
-    if (chooseEngine(item) === 'mpv') startMpvItem(item, start, token);
-    else startHtml5(item, start, token);
+    const go = () => {
+      if (token !== loadToken) return;
+      if (chooseEngine(item) === 'mpv') startMpvItem(item, start, token);
+      else startHtml5(item, start, token);
+    };
+    // Know the codecs BEFORE choosing the engine (HEVC/AC3/10-bit go straight to mpv, no failed first attempt).
+    if (!item.info && item.path && api() && api().probeMedia && !item.missing) {
+      Promise.race([probeItem(item), new Promise(r => setTimeout(r, 700))]).then(go, go);
+    } else go();
+  }
+
+  function setABTag(txt) {
+    const tag = document.getElementById('abTag');
+    if (!tag) return;
+    tag.hidden = !txt;
+    tag.textContent = txt;
+  }
+
+  function resetAB() {
+    abLoop = { a: null, b: null, active: false };
+    abLoopBtn.classList.remove('active');
+    setABTag('');
+    abRange.hidden = true;
   }
 
   function startHtml5(item, start, token) {
@@ -392,10 +772,10 @@
     try {
       res = item.stream
         ? await a.mpvPlayUrl(item.url, common.quality, true, {
-            startPos: common.startPos, volume: common.volume, mute: common.mute,
+            startPos: common.startPos, volume: common.volume, mute: common.mute, cookies: lsGet('zephyr-ytCookies') || '', cfg: window.ZApp ? window.ZApp.engineCfg() : undefined,
             vo: lsGet('zephyr-settingVo') || 'gpu', hwdec: lsGet('zephyr-settingHwdec') || 'auto', perf: lsGet('zephyr-settingPerf') || 'smooth'
           })
-        : await a.mpvPlayExternal(Object.assign({ files: [item.path],
+        : await a.mpvPlayExternal(Object.assign({ files: [item.path], cfg: window.ZApp ? window.ZApp.engineCfg() : undefined,
             vo: lsGet('zephyr-settingVo') || 'gpu', hwdec: lsGet('zephyr-settingHwdec') || 'auto', perf: lsGet('zephyr-settingPerf') || 'smooth' }, common));
     } catch (e) { res = { ok: false, error: e && e.message }; }
     if (token !== loadToken) return;
@@ -433,13 +813,16 @@
   }
 
   function showPlayError(msg) {
+    msg = String(msg || 'Playback error');
     loader.hidden = true;
     videoSubtitle.textContent = msg;
-    showOSD(msg.slice(0, 120), 3500);
+    const readTime = clamp(msg.length * 70, 3500, 9000);   // long, helpful messages stay readable
+    showOSD(msg.slice(0, 220), readTime);
     errorStreak++;
-    if (autoNext && playlist.length > 1 && errorStreak < playlist.length) {
+    if (window.ZApp) window.ZApp.emit('playfail', playlist[currentIndex], msg);
+    if (skipBad && playlist.length > 1 && errorStreak < playlist.length && !(window.ZApp && window.ZApp.holdOnFail)) {
       const token = loadToken;
-      setTimeout(() => { if (token === loadToken) step(1); }, 1800);
+      setTimeout(() => { if (token === loadToken) step(1); }, readTime + 400);
     }
   }
 
@@ -456,12 +839,21 @@
   function pickNext(auto) {
     if (!playlist.length) return -1;
     if (shuffle && playlist.length > 1) {
-      let n;
-      do { n = Math.floor(Math.random() * playlist.length); } while (n === currentIndex);
-      return n;
+      // "bag" shuffle: every item plays once per cycle (no immediate repeats, nothing starves)
+      const cur = playlist[currentIndex];
+      if (cur) playedSet.add(cur);
+      let pool = playlist.filter(it => !playedSet.has(it) && !it.missing);
+      if (!pool.length) {
+        if (auto && repeatMode !== 1) return -1;        // finished the whole shuffled cycle
+        playedSet.clear(); if (cur) playedSet.add(cur);
+        pool = playlist.filter(it => it !== cur && !it.missing);
+        if (!pool.length) return -1;
+      }
+      return playlist.indexOf(pool[Math.floor(Math.random() * pool.length)]);
     }
-    const n = currentIndex + 1;
-    if (n >= playlist.length) return repeatMode === 1 ? 0 : -1;
+    let n = currentIndex + 1;
+    while (n < playlist.length && playlist[n].missing) n++;
+    if (n >= playlist.length) return repeatMode === 1 ? Math.max(0, playlist.findIndex(it => !it.missing)) : -1;
     return n;
   }
 
@@ -470,8 +862,9 @@
     if (dir < 0) {
       if (curTime() > 3) { seekTo(0); return; }
       while (history.length) {
-        const p = history.pop();
-        if (p !== currentIndex && p < playlist.length) { playIndex(p, { noHistory: true }); return; }
+        const it = history.pop();
+        const idx = playlist.indexOf(it);
+        if (idx >= 0 && idx !== currentIndex) { playIndex(idx, { noHistory: true }); return; }
       }
       if (currentIndex > 0) playIndex(currentIndex - 1, { noHistory: true });
       else seekTo(0);
@@ -484,6 +877,7 @@
 
   function handleEnded() {
     const item = playlist[currentIndex];
+    if (window.ZApp) window.ZApp.emit('itemend', item);
     if (item) { lsDel(posKey(item)); lsDel('zephyr-pos-' + item.fullName); }
     if (repeatMode === 2) {
       seekTo(0);
@@ -512,9 +906,12 @@
     if (video.paused) video.play().catch(() => {}); else video.pause();
   }
   function pausePlayback() { if (isMpv()) mpvSet('pause', true); else video.pause(); }
+  function resumePlayback() { if (isMpv()) mpvSet('pause', false); else if (video.getAttribute('src')) video.play().catch(() => {}); }
+  function isPlaying() { return isMpv() ? (mp.active && !mp.paused) : (!!video.getAttribute('src') && !video.paused); }
   function updatePlayIcon(playing) {
     iconPlay.hidden = playing;
     iconPause.hidden = !playing;
+    if (window.ZApp) window.ZApp.emit('playstate', !!playing);
   }
 
   let seekThrottle = 0;
@@ -540,6 +937,7 @@
       played.style.width = pct + '%';
       handle.style.left = pct + '%';
       currentTimeEl.textContent = formatTime(t);
+      if (window.ZApp) window.ZApp.emit('progress', pct, t, d);
     }
     const now = performance.now();
     if (d && now - lastReport > 1000) {
@@ -579,19 +977,35 @@
   }
 
   // -------------------------------------------------------------------- volume
+  function setBtnIcon(btn, name) {
+    const z = btn && btn.querySelector('.zi');
+    if (z && window.ZIcons) window.ZIcons.set(z, name);
+  }
   function updateMuteIcon() {
-    muteBtn.textContent = userMuted || volumeLevel === 0 ? '🔇' : (volumeLevel < 0.4 ? '🔈' : '🔊');
+    setBtnIcon(muteBtn, userMuted || volumeLevel === 0 ? 'volume-mute' : (volumeLevel < 0.5 ? 'volume-low' : 'volume-high'));
   }
   function setVolume(val, opts = {}) {
-    val = clamp(Number(val) || 0, 0, 1.5);
+    val = clamp(Number(val) || 0, 0, volumeMax);
     volumeLevel = val;
     video.volume = Math.min(1, val);
     volumeSlider.value = val;
     if (!opts.keepMute && val > 0) { userMuted = false; video.muted = false; if (isMpv() || opts.sync) mpvSet('mute', false); }
     if (isMpv() || opts.sync) mpvSet('volume', Math.round(val * 100));
     updateMuteIcon();
-    lsSet('zephyr-volume', String(val));
-    if (!opts.silent) showOSD('Volume ' + Math.round(val * 100) + '%' + (val > 1 && !isMpv() ? ' (boost needs mpv)' : ''), 900);
+    if (pref('rememberVolume', true)) lsSet('zephyr-volume', String(val));
+    if (!opts.silent) showOSD('Volume ' + Math.round(val * 100) + '%' + (val > 1 && !isMpv() && !(mpvReady && playlist[currentIndex] && playlist[currentIndex].path) ? ' (extra volume needs mpv)' : ''), 900);
+    // The browser engine cannot go above 100%: hand over to mpv (same position) the moment boost is requested.
+    const it = playlist[currentIndex];
+    if (val > 1.001 && !isMpv() && it && it.path && mpvReady && !it._boostSwitched && video.getAttribute('src') && !opts.noSwitch) {
+      it._boostSwitched = true; it.forceMpv = true;
+      showOSD('Extra volume: switching to mpv…', 1800);
+      playIndex(currentIndex, { startPos: curTime(), noHistory: true });
+    }
+  }
+  function applyVolumeLimits() {
+    volumeSlider.max = String(volumeMax);
+    volumeSlider.title = 'Volume (up to ' + Math.round(volumeMax * 100) + '%)';
+    if (volumeLevel > volumeMax) setVolume(volumeMax, { silent: true, noSwitch: true });
   }
   function toggleMute() {
     userMuted = !userMuted;
@@ -605,7 +1019,8 @@
   function toggleFullscreen() {
     if (isMpv() && mpvMode === 'off') { mpvCmd('cycle', 'fullscreen'); return; } // mpv's own window
     if (!document.fullscreenElement) {
-      const p = videoWrapper.requestFullscreen ? videoWrapper.requestFullscreen() : null;
+      const root = document.documentElement;
+      const p = root.requestFullscreen ? root.requestFullscreen() : null;
       if (p && p.catch) p.catch(() => {});
     } else {
       const p = document.exitFullscreen ? document.exitFullscreen() : null;
@@ -621,15 +1036,16 @@
   }
 
   // --------------------------------------------------------------------- speed
-  function setSpeed(rate) {
+  function setSpeed(rate, opts) {
     rate = clamp(Math.round(rate * 100) / 100, 0.25, 4);
+    if (window.ZApp && !(opts && opts.silentMem)) window.ZApp.emit('speed', rate);
     speedRate = rate;
     video.playbackRate = rate;
     if (isMpv()) mpvSet('speed', rate);
     speedLabel.textContent = rate + '×';
     speedMenu.querySelectorAll('button').forEach(b => b.classList.toggle('active', parseFloat(b.dataset.speed) === rate));
     speedMenu.hidden = true;
-    showOSD(rate + '×');
+    if (!(opts && opts.quiet)) showOSD(rate + '×');
   }
 
   // --------------------------------------------------------------------- A-B loop
@@ -646,14 +1062,14 @@
     if (abLoop.a === null) {
       abLoop.a = t;
       abLoopBtn.classList.add('active');
-      abLoopBtn.textContent = 'A–';
+      setABTag('A');
       if (isMpv()) mpvSet('ab-loop-a', t);
       showOSD('A point set');
     } else if (abLoop.b === null) {
       if (t <= abLoop.a) { showOSD('B must be after A'); return; }
       abLoop.b = t;
       abLoop.active = true;
-      abLoopBtn.textContent = 'A-B';
+      setABTag('A·B');
       updateABVisual();
       if (isMpv()) mpvSet('ab-loop-b', t); else if (!abRaf) abRaf = requestAnimationFrame(abTick);
       showOSD('A-B loop on');
@@ -758,28 +1174,42 @@
   }
 
   // Repeat / Shuffle
+  function paintRepeat() {
+    const labels = ['Off', 'All', 'One'];
+    setBtnIcon(repeatBtn, repeatMode === 2 ? 'repeat-one' : 'repeat');
+    const l = repeatBtn.querySelector('.lbl'); if (l) l.textContent = labels[repeatMode];
+    repeatBtn.title = 'Repeat: ' + labels[repeatMode];
+    repeatBtn.classList.toggle('active', repeatMode > 0);
+  }
   function cycleRepeat() {
     repeatMode = (repeatMode + 1) % 3;
-    const labels = ['🔁 Off', '🔁 All', '🔂 One'];
-    repeatBtn.textContent = labels[repeatMode];
-    repeatBtn.classList.toggle('active', repeatMode > 0);
-    showOSD(labels[repeatMode]);
+    lsSet('zephyr-repeat', String(repeatMode));
+    paintRepeat();
+    showOSD('Repeat: ' + ['off', 'all', 'one'][repeatMode]);
+  }
+  function paintShuffle() {
+    shuffleBtn.classList.toggle('active', shuffle);
+    shuffleBtn.setAttribute('aria-pressed', String(shuffle));
   }
   function toggleShuffle() {
     shuffle = !shuffle;
-    shuffleBtn.classList.toggle('active', shuffle);
-    showOSD(shuffle ? 'Shuffle on' : 'Shuffle off');
+    playedSet.clear();
+    const cur = playlist[currentIndex];
+    if (shuffle && cur) playedSet.add(cur);
+    lsSet('zephyr-shuffle', shuffle ? '1' : '0');
+    paintShuffle();
+    showOSD(shuffle ? 'Shuffle on — every item plays once per round' : 'Shuffle off');
   }
 
   // Theme & Settings
   function toggleTheme() {
+    if (window.ZApp && window.ZApp.toggleLightDark) { window.ZApp.toggleLightDark(); return; }
     const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
     document.documentElement.setAttribute('data-theme', next);
-    localStorage.setItem('zephyr-theme', next);
   }
   function openSettings() {
     settingsPanel.hidden = false;
-    $('settingTheme').value = document.documentElement.getAttribute('data-theme') || 'dark';
+    if (window.ZApp && window.ZApp.syncSettingsUI) window.ZApp.syncSettingsUI();
     $('settingVolume').value = volumeSlider.value;
     $('settingSeek').value = seekStep;
     $('settingAutoNext').checked = autoNext;
@@ -787,9 +1217,6 @@
   }
   function closeSettingsPanel() {
     if (settingsPanel) settingsPanel.hidden = true;
-    const theme = $('settingTheme').value;
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('zephyr-theme', theme);
     { const v = parseFloat($('settingVolume').value); if (Math.abs(v - volumeLevel) > 0.001) setVolume(v, { silent: true }); }
     seekStep = parseInt($('settingSeek').value, 10) || 10;
     autoNext = $('settingAutoNext').checked;
@@ -891,8 +1318,7 @@
     if (fallbackToMpv('Browser engine can\'t play this')) return;
     showPlayError(mpvReady ? 'Cannot play this file' : 'Cannot play this file — place mpv.exe next to the app for full format support');
   });
-  video.addEventListener('click', togglePlay);
-  video.addEventListener('dblclick', toggleFullscreen);
+  // click / double-click / wheel / mouse buttons are configurable and live in controls.js
 
   playPauseBtn.addEventListener('click', togglePlay);
   bigPlay.addEventListener('click', () => {
@@ -908,6 +1334,7 @@
   abLoopBtn.addEventListener('click', handleABLoop);
   screenshotBtn.addEventListener('click', takeScreenshot);
   fullscreenBtn.addEventListener('click', toggleFullscreen);
+  document.addEventListener('fullscreenchange', () => setBtnIcon(fullscreenBtn, document.fullscreenElement ? 'fullscreen-exit' : 'fullscreen'));
   pipBtn.addEventListener('click', togglePiP);
 
   speedBtn.addEventListener('click', e => { e.stopPropagation(); speedMenu.hidden = !speedMenu.hidden; positionMenu(speedMenu, speedBtn); });
@@ -924,6 +1351,7 @@
   });
   subMenu.querySelector('[data-action="off"]').addEventListener('click', () => {
     subCues = []; subtitleDisplay.textContent = ''; lastSubText = ''; subMenu.hidden = true;
+    if (window.ZApp) window.ZApp.emit('trackchosen', { type: 'sub', off: true });
     if (isMpv()) { selectedSid = 'no'; mpvSet('sid', 'no'); }
     showOSD('Subtitles off');
   });
@@ -985,7 +1413,7 @@
   repeatBtn.addEventListener('click', cycleRepeat);
   themeToggle.addEventListener('click', toggleTheme);
   alwaysOnTopBtn.addEventListener('click', toggleAlwaysOnTop);
-  settingsBtn.addEventListener('click', openSettings);
+  settingsBtn.addEventListener('click', () => { if (window.ZApp && window.ZApp.openSettings) window.ZApp.openSettings(); else openSettings(); });
   if (closeSettings) {
     closeSettings.addEventListener('click', (e) => {
       e.preventDefault();
@@ -1019,6 +1447,7 @@
     return tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || (t && t.isContentEditable);
   }
   document.addEventListener('keydown', e => {
+    if (window.ZApp && window.ZApp.handlesKeys) return;      // controls.js owns every shortcut now
     if (typingTarget(e.target) || e.altKey) return;
     const hk = (typeof hotkeys === 'object' && hotkeys) || { play: ' ', full: 'f', mute: 'm', shot: 's', book: 'b' };
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
@@ -1052,10 +1481,14 @@
   });
 
   // Init
-  const savedTheme = localStorage.getItem('zephyr-theme') || 'dark';
-  document.documentElement.setAttribute('data-theme', savedTheme);
-  { const sv = parseFloat(lsGet('zephyr-volume')); setVolume(isFinite(sv) ? sv : 1, { silent: true }); }
+
+  applyVolumeLimits();
+  { const sv = pref('rememberVolume', true) ? parseFloat(lsGet('zephyr-volume')) : NaN; setVolume(isFinite(sv) ? sv : pref('startVolume', 100) / 100, { silent: true, noSwitch: true }); }
+  shuffle = lsGet('zephyr-shuffle') === '1';
+  repeatMode = parseInt(lsGet('zephyr-repeat') || '0', 10) || 0;
+  paintShuffle(); paintRepeat(); updateMuteIcon();
   renderPlaylist();
+  restorePlaylist();
 
   // ===== mpv as main engine =====
   const mpvPlayBtn = document.getElementById('mpvPlayBtn');
@@ -1099,10 +1532,25 @@
     return true;
   }
 
-  function playStream(url) {
+  const isPlaylistUrl = (u) => /[?&]list=/.test(u) && !/[?&]v=/.test(u) || /\/playlist\?|\/(channel|c|user|@[^/]+)(\/(videos|streams))?\/?$/i.test(u);
+  async function playStream(url) {
     const u = String(url || '').trim();
     if (!u) { showOSD('Paste a URL first'); return; }
     if (!mpvReady) { showOSD('mpv (and yt-dlp for YouTube) must be next to the app for URLs', 3000); return; }
+    if (isPlaylistUrl(u) && api() && api().ytdlpPlaylist) {
+      showOSD('Reading playlist…', 4000);
+      const r = await api().ytdlpPlaylist(u, lsGet('zephyr-ytCookies') || '').catch(() => null);
+      if (r && r.ok && r.entries.length) {
+        const first = playlist.length;
+        r.entries.forEach(e => { if (!playlist.some(i => i.stream && i.url === e.url)) playlist.push(makeStreamItem(e.url, e.title, e.duration)); });
+        renderPlaylist(); savePlaylistSoon();
+        showOSD(r.entries.length + ' videos added' + (r.title ? ' from “' + r.title + '”' : ''), 2500);
+        playIndex(Math.min(first, playlist.length - 1));
+        return;
+      }
+      showOSD(r && r.error ? r.error : 'Could not read that playlist', 4000);
+      return;
+    }
     let idx = playlist.findIndex(i => i.stream && i.url === u);
     if (idx < 0) { playlist.push(makeStreamItem(u)); idx = playlist.length - 1; }
     renderPlaylist();
@@ -1221,6 +1669,23 @@
     }
     if (!isMpv() && video.videoWidth) {
       text += 'Resolution: ' + video.videoWidth + '×' + video.videoHeight + '\n';
+    }
+    {
+      const it = playlist[currentIndex];
+      const i = it && it.info;
+      if (i) {
+        text += '\n--- File ---\n';
+        if (i.container) text += 'Container: ' + i.container + '\n';
+        if (i.hasVideo) text += 'Video: ' + i.width + '×' + i.height + ' ' + codecName(i.vcodec) + (i.vprofile ? ' (' + i.vprofile + ')' : '') + (i.fps ? ' @ ' + i.fps + ' fps' : '') + (i.bitDepth >= 10 ? ' · ' + i.bitDepth + '-bit' : '') + (i.hdr ? ' · ' + i.hdr : '') + '\n';
+        if (i.acodec) text += 'Audio: ' + codecName(i.acodec) + (i.achannels ? ' · ' + i.achannels + ' ch' : '') + (i.asamplerate ? ' · ' + i.asamplerate + ' Hz' : '') + (i.audioLangs && i.audioLangs.length ? ' · ' + i.audioLangs.join('/') : '') + '\n';
+        if (i.audioTracks > 1) text += 'Audio tracks: ' + i.audioTracks + '\n';
+        if (i.subTracks) text += 'Subtitle tracks: ' + i.subTracks + (i.subLangs && i.subLangs.length ? ' (' + i.subLangs.join('/') + ')' : '') + '\n';
+        if (i.chapters) text += 'Chapters: ' + i.chapters + '\n';
+        if (i.bitrate) text += 'Bitrate: ' + Math.round(i.bitrate / 1000) + ' kbps\n';
+        if (i.title) text += 'Title tag: ' + i.title + '\n';
+        if (i.artist) text += 'Artist: ' + i.artist + (i.album ? ' · ' + i.album : '') + '\n';
+        text += 'Browser engine: ' + (browserCanPlay(i) ? 'can play' : 'cannot decode this → mpv') + '\n';
+      }
     }
     if (curDur()) text += 'Duration: ' + formatTime(curDur()) + '\n';
     if (window.electronAPI && window.electronAPI.mpvGetMediaInfo) {
@@ -1354,6 +1819,7 @@
 
   // Keyboard frame step
   document.addEventListener('keydown', (e) => {
+    if (window.ZApp && window.ZApp.handlesKeys) return;
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
     if (e.key === ',') { e.preventDefault(); frameBackBtn && frameBackBtn.click(); }
     if (e.key === '.') { e.preventDefault(); frameFwdBtn && frameFwdBtn.click(); }
@@ -1395,6 +1861,7 @@
         if (!subs.length) subTracksEl.appendChild(mkBtn('No subtitle tracks', false, null));
         subs.forEach((t, i) => subTracksEl.appendChild(mkBtn(trackLabel(t, i + 1), t.selected, async () => {
           selectedSid = t.id; subMenu.hidden = true;
+          if (window.ZApp) window.ZApp.emit('trackchosen', { type: 'sub', track: t });
           await mpvSet('sid', t.id);
           showOSD('Subtitle: ' + trackLabel(t, i + 1));
         })));
@@ -1404,6 +1871,7 @@
         if (!auds.length) audioTracksEl.appendChild(mkBtn('No audio tracks', false, null));
         auds.forEach((t, i) => audioTracksEl.appendChild(mkBtn(trackLabel(t, i + 1), t.selected, async () => {
           selectedAid = t.id; audioMenu.hidden = true;
+          if (window.ZApp) window.ZApp.emit('trackchosen', { type: 'audio', track: t });
           await mpvSet('aid', t.id);
           showOSD('Audio: ' + trackLabel(t, i + 1));
         })));
@@ -1522,6 +1990,7 @@
 
   // Shift+G / Shift+F style delay adjust (common in players)
   document.addEventListener('keydown', (e) => {
+    if (window.ZApp && window.ZApp.handlesKeys) return;
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
     if (e.key === 'z' || e.key === 'Z') {
       if (!subDelayEl) return;
@@ -1917,6 +2386,7 @@
       if (key === 'prev' && prevBtn) prevBtn.click();
       if (key === 'stop') stopAll();
       if (key === 'fullscreen') toggleFullscreen();
+      if (key === 'bookmark') { const b = document.getElementById('addBookmarkBtn'); if (b) b.click(); }
     });
   }
 
@@ -1930,6 +2400,7 @@
   }
 
   document.addEventListener('keydown', (e) => {
+    if (window.ZApp && window.ZApp.handlesKeys) return;
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
     // Ctrl+Shift+M mini
     if (e.ctrlKey && e.shiftKey && (e.key === 'M' || e.key === 'm')) {
@@ -2217,9 +2688,10 @@
     if (lsGet('zephyr-embed-v2') !== '1') {
       lsSet('zephyr-embed-v2', '1');
       const old = lsGet('zephyr-embed-mode');
-      if (!old || old === 'wid') lsSet('zephyr-embed-mode', 'off');
+      if (!old || old === 'wid' || old === 'sync') lsSet('zephyr-embed-mode', 'off');
     }
-    const saved = lsGet('zephyr-embed-mode');
+    let saved = lsGet('zephyr-embed-mode');
+    if (saved === 'wid' || saved === 'sync') { saved = 'off'; lsSet('zephyr-embed-mode', 'off'); }
     if (saved && Array.from(embedSelect.options).some(o => o.value === saved)) embedSelect.value = saved;
     embedSelect.addEventListener('change', async () => {
       lsSet('zephyr-embed-mode', embedSelect.value);
@@ -2275,6 +2747,7 @@
         case 'track-list':
           mp.tracks = Array.isArray(v) ? v : [];
           refreshHtml5Tracks();
+          if (window.ZApp) window.ZApp.emit('tracks', mp.tracks);
           break;
         case 'chapter-list':
           chapters = (Array.isArray(v) ? v : []).map((c, i) => ({ time: c.time, title: c.title || ('Chapter ' + (i + 1)) }));
@@ -2284,6 +2757,14 @@
         case 'paused-for-cache':
           loader.hidden = !v;
           break;
+        case 'media-title': {
+          const it = playlist[currentIndex];
+          // streams arrive with a URL as the name; replace it with the real title as soon as mpv/yt-dlp knows it
+          if (it && it.stream && typeof v === 'string' && v && !/^https?:/i.test(v) && it.name !== v) {
+            it.name = v; it._renamed = true; videoTitle.textContent = v; updateRow(it); savePlaylistSoon();
+          }
+          break;
+        }
         case 'ab-loop-a':
           abLoop.a = typeof v === 'number' ? v : null;
           if (abLoop.a === null) resetAB();
@@ -2316,7 +2797,10 @@
       case 'recovering':
         if (!isMpv()) break;
         loader.hidden = false;
-        showOSD('Player hiccup — recovering' + (ev.level ? ' (safe mode ' + ev.level + ')' : '') + '…', 2500);
+        showOSD((ev.reason && /video/i.test(ev.reason) ? 'Fixing video output' : 'Player hiccup — recovering') + (ev.level ? ' (compatibility level ' + ev.level + ')' : '') + '…', 2800);
+        break;
+      case 'perf':
+        showOSD('Heavy video — switched to a lighter renderer for smooth playback', 3500);
         break;
       case 'failed':
         if (!isMpv()) break;
@@ -2352,6 +2836,9 @@
   // Last line of defence: nothing in the UI should ever die silently or take the player with it.
   window.addEventListener('error', (e) => { console.error('UI error:', e.message, e.filename, e.lineno); });
   window.addEventListener('unhandledrejection', (e) => { console.error('UI rejection:', e.reason); e.preventDefault(); });
+
+  { const ck = document.getElementById('ytCookies');
+    if (ck) { ck.value = lsGet('zephyr-ytCookies') || ''; ck.addEventListener('change', () => lsSet('zephyr-ytCookies', ck.value)); } }
 
   // right-click paste on the URL box (was an inline <script> in index.html; CSP now forbids those)
   { const ui = document.getElementById('urlInput'); if (ui) ui.addEventListener('contextmenu', e => e.stopPropagation()); }
@@ -2534,6 +3021,7 @@
   }
   if (videoWrapper) {
     videoWrapper.addEventListener('contextmenu', (e) => {
+      if (window.ZApp && window.ZApp.customContext) return;      // the new menu (features.js) handles right-clicks, in fullscreen too
       e.preventDefault();
       showCtx(e.clientX, e.clientY);
     });
@@ -2849,20 +3337,8 @@
 
   // Skins
   const settingTheme = document.getElementById('settingTheme');
-  function applySkin(name) {
-    document.body.classList.remove('skin-amoled', 'skin-ocean', 'skin-forest', 'theme-light');
-    if (name === 'light') document.body.classList.add('theme-light');
-    else if (name === 'amoled') document.body.classList.add('skin-amoled');
-    else if (name === 'ocean') document.body.classList.add('skin-ocean');
-    else if (name === 'forest') document.body.classList.add('skin-forest');
-    localStorage.setItem('zephyr-skin', name || 'dark');
-  }
-  if (settingTheme) {
-    const saved = localStorage.getItem('zephyr-skin') || 'dark';
-    settingTheme.value = saved;
-    applySkin(saved);
-    settingTheme.addEventListener('change', () => applySkin(settingTheme.value));
-  }
+  function applySkin(name) { if (window.ZApp && window.ZApp.setTheme) window.ZApp.setTheme(name || 'zephyr'); }
+  if (settingTheme) settingTheme.addEventListener('change', () => applySkin(settingTheme.value));
 
   // Performance prefs stored for next mpv launch
   ['settingPerf','settingVo','settingHwdec'].forEach(id => {
@@ -2939,7 +3415,13 @@
   }
 
   // save duration when known
+  function noteDuration() {
+    const it = playlist[currentIndex];
+    const d = curDur();
+    if (it && d > 0 && Math.abs((it.duration || 0) - d) > 1 && !(it.info && it.info.duration)) { it.duration = d; updateRow(it); savePlaylistSoon(); }
+  }
   function onMediaMeta() {
+    noteDuration();
     if (currentIndex >= 0 && playlist[currentIndex]) {
       try {
         localStorage.setItem('zephyr-dur-' + playlist[currentIndex].fullName, String(curDur() || 0));
@@ -3226,40 +3708,66 @@ if (pasteUrlBtn && urlInput) {
   });
 }
 
-  // ===== Fullscreen mouse + controls auto-hide =====
-  let fsHideTimer = null;
 
-  function isFullscreen() {
-    return !!(document.fullscreenElement || document.webkitFullscreenElement);
-  }
-
-  function hideFsUi() {
-    if (!isFullscreen()) return;
-    document.body.classList.add('fs-hide-ui');
-  }
-
-  function showFsUi() {
-    document.body.classList.remove('fs-hide-ui');
-    clearTimeout(fsHideTimer);
-    if (isFullscreen()) {
-      fsHideTimer = setTimeout(hideFsUi, 2200);
-    }
-  }
-
-  if (videoWrapper) {
-    videoWrapper.addEventListener('mousemove', showFsUi);
-    videoWrapper.addEventListener('mousedown', showFsUi);
-    videoWrapper.addEventListener('click', showFsUi);
-  }
-
-  document.addEventListener('fullscreenchange', () => {
-    if (isFullscreen()) {
-      showFsUi();
-    } else {
-      clearTimeout(fsHideTimer);
-      document.body.classList.remove('fs-hide-ui');
-    }
-  });
+  // ===== bridge for features.js (themes, fullscreen UI, online info, tools, clips, memory...) =====
+  (function () {
+    const bus = {};
+    window.ZApp = {
+      api, esc, clamp, lsGet, lsSet, lsDel, formatTime, formatSize, posKey, pathToFileUrl,
+      get playlist() { return playlist; },
+      get currentIndex() { return currentIndex; },
+      get item() { return playlist[currentIndex] || null; },
+      get engine() { return engine; },
+      get mpvMode() { return mpvMode; },
+      get mpvReady() { return mpvReady; },
+      get ab() { return abLoop; },
+      get duration() { return curDur(); },
+      get volume() { return volumeLevel; },
+      get volumeStep() { return volumeStep; },
+      get seekStep() { return seekStep; },
+      get seekStepBig() { return seekStepBig; },
+      get speed() { return speedRate; },
+      toggleMute, takeScreenshot, handleABLoop, cycleRepeat, toggleShuffle, openFilesNative, applyVolumeLimits, pausePlayback, resumePlayback, isPlaying,
+      setPref(name, value) {
+        switch (name) {
+          case 'seekStep': seekStep = Number(value) || 10; break;
+          case 'seekStepBig': seekStepBig = Number(value) || 30; break;
+          case 'autoNext': autoNext = !!value; break;
+          case 'rememberPos': rememberPos = !!value; break;
+          case 'skipBad': skipBad = !!value; break;
+          case 'volumeMax': volumeMax = (Number(value) || 100) / 100; applyVolumeLimits(); break;
+          case 'volumeStep': volumeStep = (Number(value) || 5) / 100; break;
+          default: break;
+        }
+      },
+      engineCfg() {
+        return {
+          volumeMax: Math.round(volumeMax * 100), cacheMb: pref('cacheMb', 200), hrSeek: pref('hrSeek', true), compat: pref('compat', 0),
+          slang: pref('subAuto', true) ? pref('slang', 'en,eng') : '', alang: pref('alang', ''), extra: pref('mpvExtra', ''),
+          audio: { limiter: pref('softLimiter', true), normalize: pref('normalize', false), night: pref('nightMode', false) },
+          streamReload: pref('streamReload', true),
+          steps: { volume: Math.round(volumeStep * 100), seek: seekStep },
+          mouse: { wheel: pref('wheel', 'volume'), wheelShift: pref('wheelShift', 'seek'), wheelCtrl: pref('wheelCtrl', 'speed'), click: pref('click', 'playpause'),
+            dblclick: pref('dblclick', 'fullscreen'), middleClick: pref('middleClick', 'mute'), mouseBack: pref('mouseBack', 'prev'), mouseForward: pref('mouseForward', 'next') }
+        };
+      },
+      get time() { return curTime(); },
+      get seeking() { return isSeeking; },
+      isMpv, showOSD, playIndex, seekTo, seekRelative, step, togglePlay, stopAll, setSpeed, setVolume, toggleFullscreen,
+      addNativePaths, playStream, renderPlaylist, updateRow, savePlaylistSoon, probeItem, mpvCmd, mpvSet, itemDuration,
+      itemsFor() { return playlist.slice(); },
+      selectedItems, clearSelection, selectAll, removeItems, queueNext, runtimeLabel,
+      setSelection(items) { selection.clear(); items.forEach((it) => selection.add(it)); lastSelected = items[items.length - 1] || null; refreshSelectionUI(); },
+      addStreamItem(url, title, duration) { const it = makeStreamItem(url, title, duration); playlist.push(it); renderPlaylist(); savePlaylistSoon(); return it; },
+      get plFilterActive() { return !!plFilter; },
+      setMpvReady(v) {
+        mpvReady = !!v;
+        if (mpvStatus) { mpvStatus.textContent = mpvReady ? 'mpv ready' : 'mpv missing'; mpvStatus.style.color = mpvReady ? 'var(--accent)' : 'var(--text-muted)'; }
+      },
+      on(name, fn) { (bus[name] || (bus[name] = [])).push(fn); },
+      emit(name, ...args) { (bus[name] || []).forEach((fn) => { try { fn(...args); } catch (e) { console.error('ZApp.' + name, e); } }); }
+    };
+  })();
 
 })();
 

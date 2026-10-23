@@ -39,10 +39,32 @@ function buildSection(edition, existing) {
     asar: true,
     directories: { output: 'dist/' + edition },
     // everything the app needs; tests, caches and big tool folders are not packed into the archive
-    files: ['*.js', 'js/**', 'css/**', 'assets/**', 'index.html', 'splash.html', 'package.json', '!tests/**', '!editions/**', '!dist/**', '!releases/**', '!node_modules/**/{test,tests,__tests__,docs,example,examples}/**'],
-    // tools are copied NEXT TO the exe (that is where the app looks for them). Only files that exist at build time are included.
+    files: [
+      '*.js',
+      'js/**',
+      'css/**',
+      'assets/**',
+      'index.html',
+      'splash.html',
+      'package.json',
+      'README.md',
+      'TOOLS.md',
+      'setup-tools.ps1',
+      'setup-tools.bat',
+      'LICENSE.txt',
+      'THIRD_PARTY_NOTICES.txt',
+      'THIRD_PARTY_NOTICES.additions.txt',
+      '!tests/**',
+      '!editions/**',
+      '!dist/**',
+      '!releases/**',
+      '!node_modules/**/{test,tests,__tests__,docs,example,examples}/**'
+    ],
+
+    // The tools for THIS edition are packed next to the exe (that is where the app looks first)
     extraFiles: [
-      { from: '.', to: '.', filter: ['mpv.exe', 'mpv.com', 'yt-dlp.exe', 'deno.exe', 'qjs.exe', 'whisper-cli.exe', '*.dll', 'ffmpeg/**', 'models/**', 'shaders/**', 'setup-tools.ps1', 'setup-tools.bat', 'README.md', 'TOOLS.md', 'LICENSE.txt', 'THIRD_PARTY_NOTICES.txt'] }
+      { from: 'build/tools-' + edition, to: '.', filter: ['**/*'] },
+      { from: '.', to: '.', filter: ['setup-tools.ps1', 'setup-tools.bat', 'README.md', 'TOOLS.md', 'LICENSE.txt', 'THIRD_PARTY_NOTICES.txt'] }
     ],
     fileAssociations: [
       { ext: EXT.video, name: 'Video file', description: 'Video file', role: 'Viewer' },
@@ -50,10 +72,24 @@ function buildSection(edition, existing) {
       { ext: EXT.playlist, name: 'Playlist', description: 'Playlist', role: 'Viewer' }
     ],
     win: {
-      target: [{ target: 'nsis', arch: legacy ? ['ia32', 'x64'] : ['x64'] }, { target: 'portable', arch: ['x64'] }],
+      target: [
+        { target: 'nsis', arch: legacy ? ['ia32', 'x64'] : ['x64'] },
+        { target: 'portable', arch: ['x64'] }
+      ],
       artifactName: 'ZephyrPlayer-${version}-' + edition + '-${arch}.${ext}'
     },
-    nsis: { oneClick: false, perMachine: false, allowToChangeInstallationDirectory: true, deleteAppDataOnUninstall: false, shortcutName: 'ZephyrPlayer', include: 'build/installer.nsh' }
+    nsis: {
+      oneClick: false,
+      perMachine: false,
+      allowToChangeInstallationDirectory: true,
+      deleteAppDataOnUninstall: false,
+      shortcutName: 'ZephyrPlayer',
+      include: 'build/installer.nsh',
+      artifactName: 'ZephyrPlayer-${version}-' + edition + '-Setup.${ext}'
+    },
+    portable: {
+      artifactName: 'ZephyrPlayer-${version}-' + edition + '-Portable.${ext}'
+    }
   };
 }
 
@@ -89,9 +125,9 @@ function applyEdition(pkg, edition) {
   out.scripts['dist:legacy'] = 'node editions/apply-edition.js legacy && electron-builder --win';
   out.devDependencies = Object.assign({}, out.devDependencies || {});
   if (edition === 'legacy') {
-    out.devDependencies.electron = LEGACY_ELECTRON;                  // exact pin: ^ would pull a version that does not run on Windows 8.1
+    out.devDependencies.electron = LEGACY_ELECTRON;
     out.devDependencies['electron-builder'] = LEGACY_BUILDER;
-    if (out.dependencies && out.dependencies['electron-updater']) out.dependencies['electron-updater'] = '^5.3.0';   // 6.x needs a newer Electron
+    if (out.dependencies && out.dependencies['electron-updater']) out.dependencies['electron-updater'] = '^5.3.0';
   }
   out.build = deepMerge(out.build || {}, buildSection(edition, out.build));
   out.build.directories = Object.assign({}, out.build.directories, { output: 'dist/' + edition });
@@ -113,7 +149,9 @@ function main(argv) {
   if (!fs.existsSync(bak)) fs.copyFileSync(pkgPath, bak);
   const applied = applyEdition(JSON.parse(fs.readFileSync(bak, 'utf8')), arg);
   fs.writeFileSync(pkgPath, JSON.stringify(applied, null, 2) + '\n');
-  fs.mkdirSync(path.join(root, 'build'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'build', 'tools-' + arg), { recursive: true });
+  const keep = path.join(root, 'build', 'tools-' + arg, 'TOOLS-FOLDER.txt');
+  if (!fs.existsSync(keep)) fs.writeFileSync(keep, 'Tools for the ' + arg + ' edition are placed here by editions/build-release.bat and packed next to the exe.\r\n');
   fs.writeFileSync(path.join(root, 'build', 'installer.nsh'), installerNsh(applied.build.productName, (applied.build.win && applied.build.win.executableName ? applied.build.win.executableName : applied.build.productName) + '.exe'));
   console.log('package.json prepared for the ' + arg.toUpperCase() + ' edition' + (arg === 'legacy' ? ' (Electron ' + LEGACY_ELECTRON + ')' : '') + '. Backup: package.json.edition-backup');
   return 0;

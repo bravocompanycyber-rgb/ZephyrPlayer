@@ -85,14 +85,16 @@ class MpvIpc extends EventEmitter {
     if (msg.event) this.emit('mpv-event', msg);
   }
 
-  command(...args) {
+  command(...args) { return this.commandT(6000, ...args); }
+
+  commandT(timeoutMs, ...args) {
     return new Promise((resolve, reject) => {
       if (!this.connected || !this.sock) return reject(new Error('mpv not connected'));
       const id = this.seq++;
       const t = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error('mpv command timeout: ' + String(args[0])));
-      }, 6000);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, t });
       try {
         this.sock.write(JSON.stringify({ command: args, request_id: id }) + '\n');

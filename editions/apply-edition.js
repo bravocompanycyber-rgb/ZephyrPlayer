@@ -39,29 +39,9 @@ function buildSection(edition, existing) {
     asar: true,
     directories: { output: 'dist/' + edition },
     // everything the app needs; tests, caches and big tool folders are not packed into the archive
-    files: [
-      '*.js',
-      'js/**',
-      'css/**',
-      'assets/**',
-      'index.html',
-      'splash.html',
-      'package.json',
-      'README.md',
-      'TOOLS.md',
-      'setup-tools.ps1',
-      'setup-tools.bat',
-      'LICENSE.txt',
-      'THIRD_PARTY_NOTICES.txt',
-      'THIRD_PARTY_NOTICES.additions.txt',
-      '!tests/**',
-      '!editions/**',
-      '!dist/**',
-      '!releases/**',
-      '!node_modules/**/{test,tests,__tests__,docs,example,examples}/**'
-    ],
-
-    // The tools for THIS edition are packed next to the exe (that is where the app looks first)
+    files: ['*.js', 'js/**', 'css/**', 'assets/**', 'index.html', 'splash.html', 'package.json', '!tests/**', '!editions/**', '!dist/**', '!releases/**', '!node_modules/**/{test,tests,__tests__,docs,example,examples}/**'],
+    // The tools for THIS edition are packed next to the exe (that is where the app looks first), so the installed app works on a PC that has
+    // nothing installed. build-release.bat fills build/tools-<edition> with the right versions (Windows 8.1 gets QuickJS, not Deno).
     extraFiles: [
       { from: 'build/tools-' + edition, to: '.', filter: ['**/*'] },
       { from: '.', to: '.', filter: ['setup-tools.ps1', 'setup-tools.bat', 'README.md', 'TOOLS.md', 'LICENSE.txt', 'THIRD_PARTY_NOTICES.txt'] }
@@ -72,24 +52,10 @@ function buildSection(edition, existing) {
       { ext: EXT.playlist, name: 'Playlist', description: 'Playlist', role: 'Viewer' }
     ],
     win: {
-      target: [
-        { target: 'nsis', arch: legacy ? ['ia32', 'x64'] : ['x64'] },
-        { target: 'portable', arch: ['x64'] }
-      ],
+      target: [{ target: 'nsis', arch: legacy ? ['ia32', 'x64'] : ['x64'] }, { target: 'portable', arch: ['x64'] }],
       artifactName: 'ZephyrPlayer-${version}-' + edition + '-${arch}.${ext}'
     },
-    nsis: {
-      oneClick: false,
-      perMachine: false,
-      allowToChangeInstallationDirectory: true,
-      deleteAppDataOnUninstall: false,
-      shortcutName: 'ZephyrPlayer',
-      include: 'build/installer.nsh',
-      artifactName: 'ZephyrPlayer-${version}-' + edition + '-Setup.${ext}'
-    },
-    portable: {
-      artifactName: 'ZephyrPlayer-${version}-' + edition + '-Portable.${ext}'
-    }
+    nsis: { oneClick: false, perMachine: false, allowToChangeInstallationDirectory: true, deleteAppDataOnUninstall: false, shortcutName: 'ZephyrPlayer', include: 'build/installer.nsh' }
   };
 }
 
@@ -125,9 +91,9 @@ function applyEdition(pkg, edition) {
   out.scripts['dist:legacy'] = 'node editions/apply-edition.js legacy && electron-builder --win';
   out.devDependencies = Object.assign({}, out.devDependencies || {});
   if (edition === 'legacy') {
-    out.devDependencies.electron = LEGACY_ELECTRON;
+    out.devDependencies.electron = LEGACY_ELECTRON;                  // exact pin: ^ would pull a version that does not run on Windows 8.1
     out.devDependencies['electron-builder'] = LEGACY_BUILDER;
-    if (out.dependencies && out.dependencies['electron-updater']) out.dependencies['electron-updater'] = '^5.3.0';
+    if (out.dependencies && out.dependencies['electron-updater']) out.dependencies['electron-updater'] = '^5.3.0';   // 6.x needs a newer Electron
   }
   out.build = deepMerge(out.build || {}, buildSection(edition, out.build));
   out.build.directories = Object.assign({}, out.build.directories, { output: 'dist/' + edition });

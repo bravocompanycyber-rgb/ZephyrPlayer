@@ -471,6 +471,25 @@
   on($('healthFix'), 'click', async () => { const b = $('healthBanner'); b.hidden = true; await openTools(); runToolsJob({ only: (b.dataset.only || '').split(',').filter(Boolean) }, 'Downloading…', 'Missing tools downloaded'); });
   on($('healthClose'), 'click', () => { $('healthBanner').hidden = true; });
 
+  /* ===================================================================== clear watch history */
+  // History = resume positions, the Continue-watching shelf, the recent-files lists and the progress on library cards.
+  // The playlist, your files and your settings are not touched.
+  function clearHistory() {
+    let removed = 0;
+    try {
+      const keys = []; for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i));
+      keys.forEach((k) => { if (/^zephyr-(pos2?-|dur-)/.test(k) || k === 'zephyr-continue-v1' || k === 'zephyr-recent-v1') { localStorage.removeItem(k); removed++; } });
+      const lib = JSON.parse(localStorage.getItem('zephyr-library-v1') || '[]'); if (Array.isArray(lib)) { lib.forEach((e) => { if (e) e.progress = 0; }); localStorage.setItem('zephyr-library-v1', JSON.stringify(lib)); }
+    } catch { /* storage unavailable */ }
+    if (api() && api().clearHistory) api().clearHistory().catch(() => {});
+    A.renderPlaylist();
+    renderShelf();
+    A.showOSD('Watch history cleared' + (removed ? ' (' + removed + ' entries)' : ''), 2500);
+  }
+  A.clearHistory = clearHistory;
+  A.confirmClearHistory = () => offer('Clear your watch history? That forgets where you stopped in each file, the "Continue watching" shelf and the recent-files lists. Your playlist and files are not touched.', [
+    { label: 'Clear history', primary: true, run: clearHistory }, { label: 'Cancel', run: () => {} }]);
+
   /* ===================================================================== when nothing can play it: other players */
   let failBannerFor = null;
   async function onPlayFail(item, msg) {
@@ -501,6 +520,81 @@
   A.on('playfail', (item, msg) => { A.holdOnFail = S.get('failAction') === 'ask'; onPlayFail(item, msg); });
   on($('failClose'), 'click', () => { const b = $('failBanner'); if (b) b.hidden = true; });
   A.on('itemstart', () => { const b = $('failBanner'); if (b) b.hidden = true; });
+
+  /* ===================================================================== no sound / no picture: clear, one-click ways out */
+  // Shared banner (the same one used when a file cannot be played at all).
+  function offer(text, buttons) {
+    const box = $('failBanner'); if (!box) return;
+    $('failText').textContent = text;
+    const wrap = $('failPlayers'); wrap.textContent = '';
+    buttons.forEach((b) => {
+      const el = document.createElement('button'); el.type = 'button'; el.className = 'btn ' + (b.primary ? 'btn-primary' : 'btn-ghost'); el.textContent = b.label;
+      el.addEventListener('click', () => { box.hidden = true; b.run(); });
+      wrap.appendChild(el);
+    });
+    box.hidden = false;
+  }
+  A.offer = offer;
+  const CODEC_LABEL = { ac3: 'Dolby Digital (AC-3)', eac3: 'Dolby Digital Plus', dts: 'DTS', truehd: 'Dolby TrueHD', hevc: 'HEVC / H.265', mpeg2video: 'MPEG-2', vc1: 'VC-1', wmv3: 'WMV', wmav2: 'WMA' };
+  const codecLabel = (c) => CODEC_LABEL[c] || String(c || 'unknown').toUpperCase();
+  function mpvNote() {
+    if (A.mpvBroken || (A.mpvReady && A.lastMpvError)) return 'mpv is installed but could not play it on this PC' + (A.lastMpvError ? ' (it said: ' + A.lastMpvError.split(/\r?\n/).filter(Boolean).slice(-1)[0].slice(0, 110) + ')' : '') + '.';
+    return A.mpvReady ? '' : 'mpv, which plays it, is not available here.';
+  }
+  const BROWSER_VIDEO = ['h264', 'vp8', 'vp9', 'av1', 'theora'];
+
+  async function downloadMpv(item) {
+    if (!api() || !api().toolsInstall) return;
+    const off = api().onToolsProgress ? api().onToolsProgress((p) => { if (p && p.line && /downloading|extract|installed|==/i.test(p.line)) A.showOSD('mpv: ' + String(p.line).replace(/^\s*==\s*/, '').slice(0, 70), 2500); }) : null;
+    A.showOSD('Downloading mpv (free, about 35 MB)…', 6000);
+    const r = await api().toolsInstall({ only: ['mpv'], force: true }).catch(() => null);
+    if (typeof off === 'function') off();
+    const st = await (api().mpvAvailable ? api().mpvAvailable() : Promise.resolve(null)).catch(() => null);
+    A.setMpvReady(!!(st && st.available));
+    if (st && st.available) {
+      A.showOSD('mpv is ready', 2500);
+      if (item) { item._htmlTried = false; item._triedMpv = false; item.forceMpv = true; A.playIndex(A.playlist.indexOf(item), { startPos: A.time, noHistory: true }); }
+    } else A.showOSD('Could not download mpv' + (r && r.error ? ': ' + r.error : '') + '. Tools & health can retry.', 6000);
+  }
+
+  async function fixSound(item) {
+    if (!item || !item.path || !api() || !api().fixAudio) return;
+    const off = api().onFixProgress ? api().onFixProgress((p) => { if (p) A.showOSD('Fixing the sound… ' + p.percent + '%  (the video is not touched)', 1600); }) : null;
+    A.showOSD('Fixing the sound: the video is copied as it is, only the audio is converted. This takes a minute or two…', 5000);
+    const t = A.time;
+    const r = await api().fixAudio(item.path).catch(() => null);
+    if (typeof off === 'function') off();
+    if (r && r.ok) {
+      item.altUrl = fileUrl(r.path);
+      A.showOSD(r.cached ? 'Sound fixed (used the saved copy)' : 'Sound fixed', 2200);
+      A.playIndex(A.playlist.indexOf(item), { startPos: t, noHistory: true });
+    } else A.showOSD('Could not fix the sound: ' + ((r && r.error) || 'unknown error'), 6000);
+  }
+  A.fixSound = fixSound; A.downloadMpv = downloadMpv;
+
+  A.on('nocodec', async (item, kind) => {
+    if (!item || item._offered || item.altUrl) return;
+    item._offered = true;
+    const info = item.info || {};
+    const audioOnlyProblem = info.hasVideo === false ? false : (BROWSER_VIDEO.includes(info.vcodec) && !(info.bitDepth > 8));
+    const buttons = [];
+    if (item.path && audioOnlyProblem) buttons.push({ label: 'Fix sound (keeps the video)', primary: true, run: () => fixSound(item) });
+    if (!A.mpvReady && !A.mpvBroken) buttons.push({ label: 'Download mpv (free)', primary: !buttons.length, run: () => downloadMpv(item) });
+    let players = [];
+    if (api() && api().externalList) players = ((await api().externalList().catch(() => null)) || {}).players || [];
+    players.slice(0, 3).forEach((pl) => buttons.push({ label: 'Open in ' + pl.name + (pl.klite ? ' (K-Lite)' : ''), run: () => api().externalOpen({ id: pl.id, file: item.path }).then((o) => A.showOSD(o && o.ok ? 'Opened in ' + pl.name : 'Could not open ' + pl.name, 2500)) }));
+    if (!buttons.length) return;
+    const text = audioOnlyProblem
+      ? 'No sound: the built-in player cannot play this file\'s audio (' + codecLabel(info.acodec) + ', common on Blu-ray rips). ' + mpvNote()
+      : 'The built-in player cannot decode this file (' + codecLabel(info.vcodec !== undefined && !BROWSER_VIDEO.includes(info.vcodec) ? info.vcodec : info.acodec) + '). ' + mpvNote();
+    offer(text, buttons);
+  });
+  A.on('needmpv', () => {
+    offer('Extra volume (above 100%) needs mpv, which is not available on this PC.', [
+      { label: 'Download mpv (free)', primary: true, run: () => downloadMpv(A.item) },
+      { label: 'Not now', run: () => {} }
+    ]);
+  });
 
   /* ===================================================================== clip export */
   let lastClip = null;
@@ -683,6 +777,7 @@
     else if (key === 'diagnostics') copyDiag();
     else if (key === 'guide' && api().openDocs) api().openDocs('guide');
     else if (key === 'queue') showQueue();
+    else if (key === 'clearhistory') A.confirmClearHistory();
   });
   A.playlistToggle = function () {
     if (inFs()) { FS.pinSide = !FS.pinSide; evaluate(); }

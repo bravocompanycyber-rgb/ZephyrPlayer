@@ -1,9 +1,7 @@
 {
   "files": [
     "README.md",
-    "assets/icons/favicon.svg",
     "assets/icons/play.svg",
-    "assets/icons/zephyrplayer.ico",
     "css/style.css",
     "edition.js",
     "engine-config.js",

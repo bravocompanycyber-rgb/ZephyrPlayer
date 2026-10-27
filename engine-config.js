@@ -11,7 +11,7 @@ function cleanCfg(raw) {
   const m = c.mouse && typeof c.mouse === 'object' ? c.mouse : {};
   const pick = (v, set, d) => (set.has(v) ? v : d);
   const out = {
-    volumeMax: int(c.volumeMax, 100, 300, 200), cacheMb: int(c.cacheMb, 50, 2000, 200), hrSeek: c.hrSeek !== false, compat: int(c.compat, 0, 2, 0),
+    volumeMax: int(c.volumeMax, 100, 300, 200), cacheMb: int(c.cacheMb, 50, 2000, 200), hrSeek: c.hrSeek !== false, compat: int(c.compat, 0, 3, 0),
     streamReload: c.streamReload !== false,
     mouse: {
       wheel: pick(m.wheel, WHEEL_KINDS, 'volume'), wheelShift: pick(m.wheelShift, WHEEL_KINDS, 'seek'), wheelCtrl: pick(m.wheelCtrl, WHEEL_KINDS, 'speed'),

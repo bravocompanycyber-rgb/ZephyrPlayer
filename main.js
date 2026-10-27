@@ -104,6 +104,13 @@ app.on('child-process-gone', (_e, details) => {
 });
 
 // keep the log folder tidy: drop logs older than 14 days
+function pruneConverted() {                                   // converted copies are only a cache: drop the ones not touched for 10 days
+  try {
+    const dir = path.join(app.getPath('userData'), 'converted');
+    for (const f of fs.readdirSync(dir)) { const p = path.join(dir, f); try { if (Date.now() - fs.statSync(p).mtimeMs > 10 * 86400000) fs.unlinkSync(p); } catch {} }
+  } catch { /* none yet */ }
+}
+
 function pruneOldLogs() {
   try {
     const limit = Date.now() - 14 * 86400000;
@@ -671,6 +678,11 @@ function queueProp(name, value) {
   }, name === 'time-pos' ? 200 : 60);
 }
 
+// The safety level that actually works on THIS PC is remembered, so the "hiccup" recoveries happen once, not every time.
+function mpvLevelFile() { return path.join(app.getPath('userData'), 'mpv-level.json'); }
+function loadMpvLevel() { try { const v = Number(JSON.parse(fs.readFileSync(mpvLevelFile(), 'utf8')).level); return Number.isFinite(v) ? Math.max(0, Math.min(3, v)) : 0; } catch { return 0; } }
+function saveMpvLevel(level) { try { fs.writeFileSync(mpvLevelFile(), JSON.stringify({ level, at: Date.now() })); } catch { /* not important */ } }
+
 function getSession() {
   const mpvPath = findMpv();
   if (!mpvPath) return null;
@@ -682,6 +694,7 @@ function getSession() {
 
   session = new MpvSession({ mpvPath, log });
   session.on('prop', queueProp);
+  session.on('stable', (info) => { if (info && Number.isFinite(info.level)) { if (info.level > 0 || loadMpvLevel() > 0) saveMpvLevel(info.level); } });
   session.on('started', (info) => safeSend('mpv-event', { type: 'started', level: info.level }));
   session.on('file-loaded', () => safeSend('mpv-event', { type: 'file-loaded' }));
   session.on('end-file', (info) => {
@@ -775,6 +788,7 @@ async function startPlayback(opts = {}) {
     cookies: COOKIE_BROWSERS.has(opts.cookies) ? opts.cookies : null,
     cfg: cleanCfg(opts.cfg)
   };
+  base.cfg.compat = Math.max(base.cfg.compat, loadMpvLevel());
   {
     const ex = parseUserMpvOptions(opts.cfg && opts.cfg.extra);
     base.userExtra = ex.accepted;
@@ -1015,6 +1029,7 @@ function createMenu() {
             dialog.showMessageBox(dialogParent() || undefined, { type: r.ok ? 'info' : 'warning', title: 'yt-dlp', message: r.ok ? 'yt-dlp is up to date' : 'Update failed', detail: r.output });
           }
         },
+        { label: 'Clear watch history…', click: () => safeSend('hotkey', 'clearhistory') },
         {
           label: 'Open icons folder',
           click: () => { try { shell.openPath(ICON_DIRS().find((d) => fileExists(d)) || ICON_DIRS()[0]); } catch {} }
@@ -1571,6 +1586,30 @@ handle('media:exportClip', async (_e, o) => {
 });
 
 // Delete = Recycle Bin (always recoverable), media files only, never folders.
+// "Fix sound": copy the video untouched, convert only the audio to AAC, so files with AC-3 / DTS / TrueHD (Blu-ray rips) play in the built-in player.
+let fixingAudio = false;
+handle('media:fixAudio', async (_e, file) => {
+  if (typeof file !== 'string' || mediaUtils.isUrl(file) || !mediaUtils.isMedia(file) || !fileExists(file)) return { ok: false, error: 'Not a local media file' };
+  const ff = findFfmpeg();
+  if (!ff) return { ok: false, error: 'ffmpeg is not installed (Tools & health can download it)' };
+  if (fixingAudio) return { ok: false, error: 'Another conversion is already running' };
+  fixingAudio = true;
+  try {
+    const st = await fs.promises.stat(file);
+    const dir = path.join(app.getPath('userData'), 'converted');
+    await fs.promises.mkdir(dir, { recursive: true });
+    const id = require('crypto').createHash('sha1').update(file + '|' + st.size + '|' + Math.round(st.mtimeMs)).digest('hex').slice(0, 20);
+    const out = path.join(dir, id + '.mp4');
+    try { if ((await fs.promises.stat(out)).size > 1000) return { ok: true, path: out, cached: true }; } catch { /* not converted yet */ }
+    const info = await getProbe().probe(file);
+    const tmp = path.join(dir, id + '.part.mp4');             // written under another name, so a cancelled run never leaves a broken file
+    const r = await mediaTools.fixAudio(ff, { input: file, out: tmp, duration: info && info.duration || 0, onProgress: (p) => safeSend('fix-progress', { percent: p }) });
+    if (!r.ok) return r;
+    await fs.promises.rename(tmp, out);
+    return { ok: true, path: out, size: r.size };
+  } finally { fixingAudio = false; }
+});
+
 handle('files:trash', async (_e, paths) => {
   const results = [];
   for (const p of (Array.isArray(paths) ? paths : []).slice(0, 500)) {
@@ -1982,7 +2021,12 @@ handle('subtitles:cancel', async () => {
 /* History / Progress                                                         */
 /* -------------------------------------------------------------------------- */
 
-handle('history:clear', async () => ({ ok: true }));
+handle('history:clear', async () => {
+  recentFiles = [];
+  saveRecentFiles();
+  try { updateJumpList(); } catch { /* jump list is optional */ }
+  return { ok: true };
+});
 
 handle('history:recordOpened', async (_event, filePath) => {
   if (typeof filePath === 'string' && !mediaUtils.isUrl(filePath)) recordRecentFile(filePath);
@@ -2258,6 +2302,7 @@ handle('app:getInfo', async () => ({
 app.whenReady().then(() => {
   log('ZephyrPlayer starting... isPackaged:', app.isPackaged);
   pruneOldLogs();
+  pruneConverted();
   showSplash();
 
   loadRecentFiles();

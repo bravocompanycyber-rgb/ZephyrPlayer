@@ -80,6 +80,6 @@ const mk = () => new MpvSession({ mpvPath: H.MPV, platform: process.platform });
   await ty.play(T, Object.assign({}, base, { userExtra: ['--this-option-does-not-exist=1'] })); await waitFor(() => ty.connected && ty.props.duration > 19 && ty.level >= 2, 20000);
   console.log('typo in extra options -> recovered at safety level', ty.level, JSON.stringify(lv)); assert(ty.level >= 2 && lv.length >= 1); await ty.stop();
   const cc = EC.cleanCfg({ volumeMax: 99999, cacheMb: -5, compat: 9, slang: 'x'.repeat(100), mouse: { wheel: 'format-c', click: 'playpause' }, steps: { volume: 0, seek: 1e9 }, extra: 'x' });
-  assert.strictEqual(cc.volumeMax, 300); assert.strictEqual(cc.cacheMb, 50); assert.strictEqual(cc.compat, 2); assert.strictEqual(cc.slang.length, 40); assert.strictEqual(cc.mouse.wheel, 'volume', 'unknown action replaced by default'); assert.strictEqual(cc.steps.volume, 1); assert.strictEqual(cc.steps.seek, 300); assert(!('extra' in cc));
+  assert.strictEqual(cc.volumeMax, 300); assert.strictEqual(cc.cacheMb, 50); assert.strictEqual(cc.compat, 3, 'internal safety levels go up to 3 (the saved working level)'); assert.strictEqual(cc.slang.length, 40); assert.strictEqual(cc.mouse.wheel, 'volume', 'unknown action replaced by default'); assert.strictEqual(cc.steps.volume, 1); assert.strictEqual(cc.steps.seek, 300); assert(!('extra' in cc));
   console.log('ROBUSTNESS TESTS PASSED'); process.exit(0);
 })().catch((e) => { console.error('FAIL', e); process.exit(1); });

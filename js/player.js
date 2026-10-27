@@ -735,14 +735,28 @@
     abRange.hidden = true;
   }
 
+  // Can the browser engine be trusted with this file? (HEVC / x265, 10-bit, MPEG-2... make Chromium show nothing or even crash.)
+  function browserSafe(item) {
+    if (item.altUrl) return true;
+    if (item.info) return browserCanPlay(item.info);
+    return !MPV_PREFERRED.test(item.fullName || '') && !/\b(x265|h\.?265|hevc|10bit|10-bit|av1)\b/i.test(item.fullName || '');
+  }
   function startHtml5(item, start, token) {
+    if (!browserSafe(item) && !(item.info && item.info.hasVideo === false)) {
+      // refuse to load it: show the reason and the ways out instead of a blank player or a crash
+      engine = 'html5'; mp.active = false; loader.hidden = true; updatePlayIcon(false);
+      videoSubtitle.textContent = 'This file needs mpv or another player';
+      if (window.ZApp) window.ZApp.emit('nocodec', item, 'start');
+      return;
+    }
     if (isMpv() || mp.active) { const a = api(); if (a && a.mpvStop) a.mpvStop(); }
     engine = 'html5'; mp.active = false; mp.eof = false;
     loader.hidden = false;
     pendingStart = start || 0;
     video.muted = userMuted;
-    video.src = item.url;
+    video.src = item.altUrl || item.url;                      // altUrl = the converted copy ("Fix sound")
     video.playbackRate = clamp(speedRate, 0.25, 4);
+    if (!item.altUrl && item.info && !browserCanPlay(item.info) && (!mpvReady || item._htmlTried) && window.ZApp) window.ZApp.emit('nocodec', item, 'start');
     const p = video.play();
     if (p && p.catch) p.catch(err => {
       if (token !== loadToken) return;
@@ -751,6 +765,8 @@
     loadSidecarSubs(item, token);
   }
   let pendingStart = 0;
+  let mpvFailures = 0;
+  let mpvBroken = false;                 // installed, but it keeps failing on this PC (different from "not installed")
 
   async function startMpvItem(item, start, token) {
     const a = api();
@@ -996,6 +1012,7 @@
     if (!opts.silent) showOSD('Volume ' + Math.round(val * 100) + '%' + (val > 1 && !isMpv() && !(mpvReady && playlist[currentIndex] && playlist[currentIndex].path) ? ' (extra volume needs mpv)' : ''), 900);
     // The browser engine cannot go above 100%: hand over to mpv (same position) the moment boost is requested.
     const it = playlist[currentIndex];
+    if (val > 1.001 && !isMpv() && it && !mpvReady && !it._needMpvShown && window.ZApp) { it._needMpvShown = true; window.ZApp.emit('needmpv', 'volume'); }
     if (val > 1.001 && !isMpv() && it && it.path && mpvReady && !it._boostSwitched && video.getAttribute('src') && !opts.noSwitch) {
       it._boostSwitched = true; it.forceMpv = true;
       showOSD('Extra volume: switching to mpv…', 1800);
@@ -1284,7 +1301,7 @@
       item._audioChecked = true;
       if (typeof video.webkitAudioDecodedByteCount === 'number' && video.webkitAudioDecodedByteCount === 0 &&
           !video.muted && video.volume > 0 && VIDEO_EXT.test(item.fullName || '')) {
-        fallbackToMpv('Audio codec not supported by browser engine');
+        if (!fallbackToMpv('Audio codec not supported by browser engine') && !item.altUrl && window.ZApp) window.ZApp.emit('nocodec', item, 'audio');
       }
     }
   });
@@ -2790,7 +2807,7 @@
         if (item && item.path && !item._htmlTried && !item.stream) {
           item._htmlTried = true;
           engine = 'html5';
-          showOSD('mpv could not open this — trying browser engine', 2200);
+          showOSD(browserSafe(item) ? 'mpv could not open this — trying browser engine' : 'mpv could not open this file', 2200);
           startHtml5(item, mp.time, loadToken);
         } else showPlayError(ev.error || 'Could not open this file');
         break;
@@ -2803,11 +2820,13 @@
         showOSD('Heavy video — switched to a lighter renderer for smooth playback', 3500);
         break;
       case 'failed':
+        if (window.ZApp) window.ZApp.lastMpvError = String(ev.error || '').trim();
         if (!isMpv()) break;
         if (item && item.path && !item._htmlTried && !item.stream) {
           item._htmlTried = true;
           engine = 'html5';
-          showOSD('mpv failed — switching to browser engine', 2500);
+          showOSD(browserSafe(item) ? 'mpv failed — switching to browser engine' : 'mpv could not start for this file', 2500);
+          mpvFailures++; if (mpvFailures >= 2 && window.ZApp) { mpvBroken = true; window.ZApp.setMpvReady(false); showOSD('mpv does not start on this PC, so the built-in player is used', 4000); }
           startHtml5(item, mp.time, loadToken);
         } else { engine = 'html5'; mp.active = false; updatePlayIcon(false); showPlayError('mpv failed: ' + String(ev.error || 'unknown error').slice(0, 160)); }
         break;
@@ -3720,6 +3739,7 @@ if (pasteUrlBtn && urlInput) {
       get engine() { return engine; },
       get mpvMode() { return mpvMode; },
       get mpvReady() { return mpvReady; },
+      get mpvBroken() { return mpvBroken; },
       get ab() { return abLoop; },
       get duration() { return curDur(); },
       get volume() { return volumeLevel; },
@@ -3761,7 +3781,7 @@ if (pasteUrlBtn && urlInput) {
       addStreamItem(url, title, duration) { const it = makeStreamItem(url, title, duration); playlist.push(it); renderPlaylist(); savePlaylistSoon(); return it; },
       get plFilterActive() { return !!plFilter; },
       setMpvReady(v) {
-        mpvReady = !!v;
+        mpvReady = !!v; if (v) { mpvBroken = false; mpvFailures = 0; }
         if (mpvStatus) { mpvStatus.textContent = mpvReady ? 'mpv ready' : 'mpv missing'; mpvStatus.style.color = mpvReady ? 'var(--accent)' : 'var(--text-muted)'; }
       },
       on(name, fn) { (bus[name] || (bus[name] = [])).push(fn); },

@@ -229,6 +229,7 @@ A "Cannot find module" error box left open after a failed start can leave helper
 | No posters | Turn on online info in Settings; check the file name pattern; try Details > Look up again. |
 | A tool shows Missing after installing | Press Re-check; if you copied files by hand keep them in the project root (ffmpeg in `ffmpeg\`). |
 | The installed app shows a "Cannot find module" or "incomplete installation" error | The installer was built with a file list that misses newer files. On the build PC run `node editions/fix-build-files.js` once, then build again. It repairs `package.json` / `package-legacy.json` and adds a build-time check that refuses to produce a broken installer. |
+| A Blu-ray rip (mp4/mkv) has picture but **no sound**, or **extra volume** does nothing | The built-in player cannot decode AC-3 / DTS / TrueHD audio, and extra volume needs mpv. ZephyrPlayer now shows a banner: **Fix sound (keeps the video)** converts only the audio (about a minute or two, video untouched, saved so it is instant next time), **Download mpv (free)** installs the player that handles every format and extra volume, or **Open in VLC / PotPlayer / MPC-HC**. |
 | Something else | Help > Copy diagnostics and paste it in your report. Logs: File > Open log folder. |
 
 ## 12. Privacy

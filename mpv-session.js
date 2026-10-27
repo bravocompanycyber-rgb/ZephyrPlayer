@@ -272,7 +272,7 @@ class MpvSession extends EventEmitter {
     await this.stop();
     this.inputs = list;
     this.opts = Object.assign({}, opts);
-    this.level = clampN(opts.cfg && opts.cfg.compat, 0, 2, 0);
+    this.level = clampN(opts.cfg && opts.cfg.compat, 0, 3, 0);
     this.minLevel = this.level;
     this._stallReloads = 0;
     this.recoveries = 0;
@@ -367,7 +367,7 @@ class MpvSession extends EventEmitter {
     this._applyLive();
     this._armGuards();
     clearTimeout(this._stableTimer);
-    this._stableTimer = setTimeout(() => { this.recoveries = 0; }, 30000);
+    this._stableTimer = setTimeout(() => { this.recoveries = 0; this.emit('stable', { level: this.level }); }, (this.opts && this.opts.stableMs) || 30000);
     this.emit('started', { pid: child.pid, level: this.level });
     return { ok: true, pid: child.pid, level: this.level };
   }

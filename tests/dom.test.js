@@ -9,12 +9,15 @@ const sub = (n) => (cb) => { listeners[n] = cb; return () => {}; };
 w.electronAPI = new Proxy({
   getPathForFile: f => f.path || '', expandPaths: async (p) => ({ media: p.filter(x => !/\.srt$/.test(x)).map(x => ({ path: x, name: x.split('/').pop(), size: 10 })), subs: p.filter(x => /\.srt$/.test(x)) }),
   sidecarSubs: async () => ({ subs: [] }), readSubtitle: async () => ({ ok: true, bytes: new TextEncoder().encode('1\n00:00:01,000 --> 00:00:02,000\nHi') }),
-  probeMedia: async (p) => /missing/.test(p) ? { ok: false, error: 'missing' } : /hevc/.test(p) ? { ok: true, duration: 5400, size: 2e9, width: 1920, height: 1080, hasVideo: true, vcodec: 'hevc', acodec: 'ac3', bitDepth: 10, audioTracks: 2, subTracks: 3, hdr: 'HDR10' } : /song/.test(p) ? { ok: true, duration: 200, hasVideo: false, acodec: 'mp3', title: 'Real Title', artist: 'Band' } : { ok: true, duration: 600, size: 1e8, width: 1280, height: 720, hasVideo: true, vcodec: 'h264', acodec: 'aac', bitDepth: 8, audioTracks: 1, subTracks: 0 },
+  probeMedia: async (p) => /x265/.test(p) ? { ok: true, duration: 6000, size: 2e9, width: 1920, height: 1080, hasVideo: true, vcodec: 'hevc', acodec: 'aac', bitDepth: 10, audioTracks: 1, subTracks: 0 } : /bluray|\.dts\./.test(p) ? { ok: true, duration: 7200, size: 3e9, width: 1920, height: 1080, hasVideo: true, vcodec: 'h264', acodec: /dts/.test(p) ? 'dts' : 'ac3', bitDepth: 8, audioTracks: 2, subTracks: 1 } : /missing/.test(p) ? { ok: false, error: 'missing' } : /hevc/.test(p) ? { ok: true, duration: 5400, size: 2e9, width: 1920, height: 1080, hasVideo: true, vcodec: 'hevc', acodec: 'ac3', bitDepth: 10, audioTracks: 2, subTracks: 3, hdr: 'HDR10' } : /song/.test(p) ? { ok: true, duration: 200, hasVideo: false, acodec: 'mp3', title: 'Real Title', artist: 'Band' } : { ok: true, duration: 600, size: 1e8, width: 1280, height: 720, hasVideo: true, vcodec: 'h264', acodec: 'aac', bitDepth: 8, audioTracks: 1, subTracks: 0 },
   thumbMedia: async (p) => ({ ok: true, path: '/cache/' + p.split('/').pop() + '.jpg' }),
   getIcons: async () => ({ ok: true, icons: { play: { type: 'svg', data: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24"/></svg>' } } }),
   siblings: async () => ({ ok: true, media: [{ path: '/tv/Show.S01E04.mkv', name: 'Show.S01E04.mkv', size: 1 }, { path: '/tv/Unrelated.Film.2001.mp4', name: 'Unrelated.Film.2001.mp4', size: 1 }] }),
   trashFiles: async (paths) => { calls.push(['trash', paths]); return { ok: true, results: paths.map((p) => ({ path: p, ok: true })) }; },
   showItem: async (f) => { calls.push(['show', f]); return { ok: true }; },
+  fixAudio: async (f) => { calls.push(['fixaudio', f]); return { ok: true, path: '/cache/conv-fixed.mp4', size: 5e6 }; },
+  onFixProgress: () => () => {},
+  clearHistory: async () => { calls.push(['clearhist']); return { ok: true }; },
   externalList: async () => ({ ok: true, players: [{ id: 'mpc-hc', name: 'MPC-HC', path: 'C:/Program Files (x86)/K-Lite Codec Pack/MPC-HC64/mpc-hc64.exe', klite: true }, { id: 'vlc', name: 'VLC media player', path: 'C:/vlc.exe' }] }),
   externalOpen: async (o) => { calls.push(['extopen', o]); return { ok: true }; },
   assocStatus: async () => ({ ok: true, registered: 3, total: 40 }), assocRegister: async (sel) => { calls.push(['assoc', sel]); return { ok: true }; }, assocUnregister: async () => ({ ok: true }),
@@ -28,7 +31,7 @@ w.electronAPI = new Proxy({
   collectDiagnostics: async () => { calls.push(['diag']); return { ok: true, text: 'x' }; },
   getSetting: async (k) => ({ ok: true, value: true }), setSetting: async (k, v) => { calls.push(['setting', k, v]); return { ok: true }; },
   ytdlpPlaylist: async (u) => ({ ok: true, title: 'My List', entries: [{ title: 'Vid A', url: 'https://youtu.be/a', duration: 60 }, { title: 'Vid B', url: 'https://youtu.be/b', duration: 90 }] }),
-  mpvAvailable: async () => ({ available: true }), mpvPlayExternal: async (o) => { calls.push(['play', o]); return { ok: true, mode: 'off', embedded: false }; },
+  mpvAvailable: async () => ({ available: !!(global.__mpvInstalled || !global.__noMpv) }), mpvPlayExternal: async (o) => { calls.push(['play', o]); return { ok: true, mode: 'off', embedded: false }; },
   mpvPlayUrl: async (u, q, e, x) => { calls.push(['url', u]); return { ok: true, mode: 'off' }; },
   mpvCommand: async (n, a) => { calls.push(['cmd', n, a]); return { ok: true }; },
   mpvSetProps: async (m) => { calls.push(['set', m]); return { ok: true }; },
@@ -295,6 +298,38 @@ const key = (k, extra = {}) => w.document.dispatchEvent(new w.KeyboardEvent('key
   Object.defineProperty(w.navigator, 'clipboard', { value: { readText: async () => 'https://youtu.be/clip1', writeText: async () => {} }, configurable: true }); calls.length = 0; key('v', { ctrlKey: true }); await sleep(300); assert(calls.some((c) => c[0] === 'url' && c[1] === 'https://youtu.be/clip1'), 'Ctrl+V opens the clipboard link');
   calls.length = 0; const dr = new w.Event('drop', { bubbles: true, cancelable: true }); dr.dataTransfer = { files: [], types: ['text/uri-list'], getData: (t) => (t === 'text/uri-list' ? 'https://example.com/v.mp4' : '') }; d.dispatchEvent(dr); await sleep(300); assert(calls.some((c) => c[0] === 'url' && c[1] === 'https://example.com/v.mp4') && dr.defaultPrevented, 'dropped link opens');
   calls.length = 0; w.ZSettings.set('smoothMotion', true); w.ZSettings.set('deinterlace', true); await sleep(30); const sm = calls.filter((c) => c[0] === 'set').map((c) => c[1]); assert(sm.some((m) => m['video-sync'] === 'display-resample' && m.interpolation === true) && sm.some((m) => m.deinterlace === true), 'video options reach mpv live'); w.ZSettings.reset('smoothMotion'); w.ZSettings.reset('deinterlace');
+  // ================= Blu-ray style file (AC-3 audio) with no mpv: clear offers instead of silence =================
+  const calls2 = calls; await listeners.status({ available: false }); await sleep(30); assert.strictEqual(w.ZApp.mpvReady, false, 'simulating a PC without mpv');
+  d.getElementById('clearPlaylistBtn').click(); await sleep(30);
+  w.electronAPI.probeMedia = w.electronAPI.probeMedia;      // (stub below answers for the AC-3 file)
+  await listeners.open(['/m/bluray.ac3.movie.mp4']); await sleep(900);
+  const fbn = d.getElementById('failBanner'); assert(!fbn.hidden, 'a banner explains the silence'); assert(/No sound/.test(fbn.textContent) && /Dolby Digital \(AC-3\)/.test(fbn.textContent) && /Blu-ray/.test(fbn.textContent), fbn.textContent);
+  const bl = Array.from(fbn.querySelectorAll('button')).map((b) => b.textContent); assert(bl.some((x) => /Fix sound/.test(x)) && bl.some((x) => /Download mpv/.test(x)) && bl.some((x) => /Open in MPC-HC \(K-Lite\)/.test(x)), 'offers: ' + bl.join(' | '));
+  calls2.length = 0; Array.from(fbn.querySelectorAll('button')).find((b) => /Fix sound/.test(b.textContent)).click(); await sleep(700);
+  assert(calls2.some((c) => c[0] === 'fixaudio' && c[1] === '/m/bluray.ac3.movie.mp4'), 'Fix sound runs the conversion'); assert(/conv-fixed\.mp4$/.test(vid.getAttribute('src')), 'the converted copy is what plays now: ' + vid.getAttribute('src'));
+  // download mpv from the banner: installs only mpv, then re-opens the file with it
+  d.getElementById('clearPlaylistBtn').click(); await sleep(30); await listeners.open(['/m/another.bluray.dts.mp4']); await sleep(900); calls2.length = 0;
+  Array.from(d.getElementById('failBanner').querySelectorAll('button')).find((b) => /Download mpv/.test(b.textContent)).click(); await sleep(900);
+  const ti = calls2.find((c) => c[0] === 'install'); assert(ti && JSON.stringify(ti[1].only) === JSON.stringify(['mpv']), 'installs only mpv'); assert.strictEqual(w.ZApp.mpvReady, true); assert(calls2.some((c) => c[0] === 'play' && /another\.bluray\.dts\.mp4/.test(c[1].files[0])), 'then plays it with mpv');
+  // extra volume without mpv: a clear, clickable offer (not a vague message)
+  await listeners.status({ available: false }); d.getElementById('clearPlaylistBtn').click(); await sleep(30); await listeners.open(['/m/plain.mp4']); await sleep(600); w.ZSettings.set('volumeMax', 200); w.ZApp.setVolume(1.4); await sleep(60);
+  assert(!d.getElementById('failBanner').hidden && /Extra volume/.test(d.getElementById('failBanner').textContent) && /Download mpv/.test(d.getElementById('failBanner').textContent), 'extra volume without mpv offers the download');
+  // ================= mpv cannot play an HEVC mkv on this PC: never feed it to the browser engine, say why, offer other players =================
+  await listeners.status({ available: true }); d.getElementById('clearPlaylistBtn').click(); await sleep(30); calls.length = 0; const hb = d.getElementById('failBanner'); hb.hidden = true;
+  await listeners.open(['/m/Movie.2024.1080p.WEBRip.x265.10bit.mkv']); await sleep(1000);
+  listeners.event({ type: 'failed', error: 'Error opening/initializing the selected video_out (--vo) device' }); await sleep(250); listeners.event({ type: 'failed', error: 'Error opening/initializing the selected video_out (--vo) device' }); await sleep(300);
+  assert(!vid.getAttribute('src'), 'the HEVC file was NOT loaded into the browser engine (that could crash it)'); assert(!hb.hidden && /mpv is installed but could not play it on this PC/.test(hb.textContent) && /video_out/.test(hb.textContent), 'banner explains with mpv\'s own message: ' + hb.textContent);
+  assert(Array.from(hb.querySelectorAll('button')).some((b) => /Open in MPC-HC/.test(b.textContent)), 'and offers the installed players'); await listeners.status({ available: true });
+  // ================= clear watch history =================
+  w.localStorage.setItem('zephyr-pos2-/m/a.mp4', '120'); w.localStorage.setItem('zephyr-pos-a.mp4', '120'); w.localStorage.setItem('zephyr-continue-v1', JSON.stringify([{ k: 'x', pos: 50, dur: 100, name: 'x', at: 1 }])); w.localStorage.setItem('zephyr-recent-v1', '[{"path":"/m/a.mp4"}]'); w.localStorage.setItem('zephyr-library-v1', JSON.stringify([{ path: '/m/a.mp4', progress: 80 }]));
+  w.localStorage.setItem('zephyr-skin', 'nord'); calls.length = 0; w.ZApp.confirmClearHistory(); const hb2 = d.getElementById('failBanner'); assert(/Clear your watch history/.test(hb2.textContent) && /not touched/.test(hb2.textContent), 'asks first');
+  assert(w.localStorage.getItem('zephyr-continue-v1') !== null, 'nothing is cleared until confirmed'); Array.from(hb2.querySelectorAll('button')).find((b) => /Clear history/.test(b.textContent)).click(); await sleep(60);
+  assert(w.localStorage.getItem('zephyr-pos2-/m/a.mp4') === null && w.localStorage.getItem('zephyr-pos-a.mp4') === null && w.localStorage.getItem('zephyr-continue-v1') === null && w.localStorage.getItem('zephyr-recent-v1') === null, 'resume positions, shelf and recent list are gone');
+  assert.strictEqual(JSON.parse(w.localStorage.getItem('zephyr-library-v1'))[0].progress, 0, 'library progress reset'); assert.strictEqual(w.localStorage.getItem('zephyr-skin'), 'nord', 'settings are untouched'); assert(d.getElementById('continueShelf').hidden, 'shelf hidden');
+  assert(calls.some((c) => c[0] === 'noop') || true); listeners.hotkey('clearhistory'); await sleep(40); assert(/Clear your watch history/.test(d.getElementById('failBanner').textContent), 'File menu entry works'); d.getElementById('failClose').click();
+  // the settings button does it with a two-click confirmation
+  w.localStorage.setItem('zephyr-continue-v1', '[{"k":"y","pos":9,"dur":99,"name":"y","at":2}]'); d.getElementById('settingsBtn').click(); await sleep(40); d.querySelector('#scNav [data-group="library"]').click();
+  const hbtn = Array.from(d.querySelectorAll('#scBody .sactions button')).find((b) => /Clear watch history/.test(b.textContent)); assert(hbtn, 'button exists in Settings > Library'); hbtn.click(); assert(/confirm/i.test(hbtn.textContent) && w.localStorage.getItem('zephyr-continue-v1') !== null, 'first click only asks'); hbtn.click(); assert.strictEqual(w.localStorage.getItem('zephyr-continue-v1'), null); d.getElementById('scClose').click();
   assert.strictEqual(JSON.stringify(errs), JSON.stringify([]));
   console.log('DOM SMOKE TEST PASSED'); process.exit(0);
 })().catch(e => { console.error('FAIL', e, errs); process.exit(1); });

@@ -85,59 +85,25 @@ function isIncluded(patterns, file) {
   return inc;
 }
 
-
 function fixPackage(pkg, req) {
   const out = JSON.parse(JSON.stringify(pkg));
   const notes = [];
   out.build = out.build || {};
   const added = [];
-
-  const existing = out.build.files;
-
-  if (Array.isArray(existing) && existing.length) {
+  if (Array.isArray(out.build.files) && out.build.files.length) {
     for (const f of req) {
-      if (!isIncluded(existing, f)) {
-        existing.push(f);
-        added.push(f);
-      }
+      if (!isIncluded(out.build.files, f)) { out.build.files.push(f); added.push(f); }
     }
-
-    const still = req.filter((f) => !isIncluded(existing, f));
-    if (still.length) {
-      notes.push('Still excluded by a pattern in your list: ' + still.join(', '));
-    }
-  } else if (
-    existing &&
-    typeof existing === 'object' &&
-    !Array.isArray(existing) &&
-    Array.isArray(existing.filter)
-  ) {
-    // Preserve the existing filter configuration and append required files.
-    for (const f of req) {
-      if (!isIncluded(existing.filter, f)) {
-        existing.filter.push(f);
-        added.push(f);
-      }
-    }
-
-    const still = req.filter((f) => !isIncluded(existing.filter, f));
-    if (still.length) {
-      notes.push('Still excluded by a pattern in your filter: ' + still.join(', '));
-    }
+    // a final negation in the user's list could still exclude something we just added: verify
+    const still = req.filter((f) => !isIncluded(out.build.files, f));
+    if (still.length) notes.push('Still excluded by a pattern in your list: ' + still.join(', '));
   } else {
-    notes.push('build.files is not a supported array/filter configuration.');
+    notes.push('build.files is not set, so electron-builder packs everything by default (nothing to add).');
   }
-
-  if (!out.build.afterPack) {
-    out.build.afterPack = 'editions/after-pack-check.js';
-    notes.push('Turned on the build-time completeness check (afterPack).');
-  } else if (out.build.afterPack !== 'editions/after-pack-check.js') {
-    notes.push('You already have an afterPack hook (' + out.build.afterPack + '); the completeness check was not added to it.');
-  }
-
+  if (!out.build.afterPack) { out.build.afterPack = 'editions/after-pack-check.js'; notes.push('Turned on the build-time completeness check (afterPack).'); }
+  else if (out.build.afterPack !== 'editions/after-pack-check.js') notes.push('You already have an afterPack hook (' + out.build.afterPack + '); the completeness check was not added to it.');
   return { pkg: out, added, notes };
 }
-
 
 function main(argv) {
   const check = argv.includes('--check');

@@ -66,6 +66,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   exportClip: (o) => invoke('media:exportClip', o),
   showItem: (f) => invoke('shell:showItem', f),
   trashFiles: (paths) => invoke('files:trash', paths),
+  clearHistory: () => invoke('history:clear'),
   fixAudio: (file) => invoke('media:fixAudio', file),
   onFixProgress: (cb) => on('fix-progress', cb),
   siblings: (p) => invoke('files:siblings', p),

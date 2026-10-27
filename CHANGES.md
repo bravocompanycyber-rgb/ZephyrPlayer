@@ -1,6 +1,7 @@
 # ZephyrPlayer upgrade v6
 
-## Latest: distribution build + self-diagnosing interface
+## Latest: Blu-ray audio, no-mpv offers, distribution build, self-diagnosing interface
+- **Blu-ray style files (AC-3 / DTS / TrueHD audio)** no longer end in silence when mpv is missing or will not start: a banner offers **Fix sound** (video copied untouched, only audio converted to AAC with FFmpeg, cached), **Download mpv**, or **Open in VLC / PotPlayer / MPC-HC**. **Extra volume without mpv** now offers the mpv download instead of a vague message. If mpv fails to start twice, the app stops trying it and says so.
 - `editions/build-release.bat` builds installers FOR OTHER PCs: per-edition tools packed inside (legacy = QuickJS, not Deno), file list checked, `--publish never`, prints exactly which file to copy.
 - If the interface ever fails to start, a red message now appears on screen (and in the log) instead of a window where nothing reacts. **F12** opens developer tools even when buttons are dead.
 

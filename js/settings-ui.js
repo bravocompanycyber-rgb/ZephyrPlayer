@@ -271,7 +271,7 @@
       if (g.id === 'library') content.appendChild(actionsBlock([
         btn('Fetch info for the whole playlist', 'Looks up posters and info for every item, slowly, to respect the free services’ limits. Needs the online option above.', () => A.fetchAllInfo && A.fetchAllInfo()),
         btn('Clear poster cache', 'Deletes the downloaded posters and lookup results from this PC.', () => A.clearOnlineCache && A.clearOnlineCache()),
-        btn('Clear watch history', 'Forgets resume positions and the Continue-watching shelf.', () => { const b = $('clearHistoryBtn'); if (b) b.click(); })]));
+        (() => { const b = btn('Clear watch history', 'Forgets where you stopped in each file, the Continue-watching shelf and the recent-files lists. Your playlist and files are not touched.', () => two('hist', 'Clear watch history', () => { A.clearHistory(); render(); }, b), 'danger-outline'); return b; })()]));
       if (g.id === 'controls') content.appendChild(actionsBlock([btn('Reset all shortcuts', 'Restores every keyboard shortcut to the default.', () => { S.reset('keymap'); render(); A.showOSD('Shortcuts reset'); })]));
       if (g.id === 'system') { content.appendChild(assocBlock()); content.appendChild(playersBlock()); }
       if (advs.length) {

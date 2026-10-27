@@ -44,20 +44,65 @@ call npx electron-builder --win --publish never || (node editions\apply-edition.
 node editions\apply-edition.js --restore
 exit /b 0
 
+
 :summary
 echo.
-echo ===================== DONE =====================
-echo Copy THIS file to the other PC and run it (it installs ZephyrPlayer):
-if exist dist\modern dir /b dist\modern\*Setup*.exe dist\modern\*.exe 2>nul
-if exist dist\legacy dir /b dist\legacy\*.exe 2>nul
+echo ============================================================
+echo                  BUILD COMPLETED SUCCESSFULLY
+echo ============================================================
 echo.
-echo   dist\modern  = Windows 10 / 11        dist\legacy = Windows 7 / 8 / 8.1 (also works on 10 / 11)
-echo   Do NOT copy the win-unpacked folder or the .blockmap / .yml files. The "portable" .exe runs without installing.
-echo   After installing on the other PC: Tools ^& health ^> Run self-test.
+echo Your ZephyrPlayer installer files are located here:
+echo.
+
+if /i not "%WHICH%"=="legacy" (
+    echo [MODERN] Windows 10 / 11
+    echo Folder: %CD%\dist\modern
+    if exist "dist\modern" (
+        dir /b "dist\modern\*.exe" 2>nul
+    ) else (
+        echo WARNING: Modern output folder not found!
+    )
+    echo.
+)
+
+if /i not "%WHICH%"=="modern" (
+    echo [LEGACY] Windows 7 / 8 / 8.1
+    echo Folder: %CD%\dist\legacy
+    if exist "dist\legacy" (
+        dir /b "dist\legacy\*.exe" 2>nul
+    ) else (
+        echo WARNING: Legacy output folder not found!
+    )
+    echo.
+)
+
+echo ============================================================
+echo Copy the Setup .exe to the other PC and run it.
+echo Do not copy the win-unpacked folder or .blockmap/.yml files.
+echo ============================================================
+echo.
+echo Press any key to close this window...
+pause >nul
 exit /b 0
 
 :fail
 echo.
-echo BUILD FAILED - your package.json was restored. Read the messages above.
+echo ============================================================
+echo                       BUILD FAILED
+echo ============================================================
+echo.
+echo One or more build steps failed.
+echo Check the error messages above.
+echo.
+echo Expected output folders:
+echo   Modern: %CD%\dist\modern
+echo   Legacy: %CD%\dist\legacy
+echo.
+echo Attempting to restore package.json and edition files...
 node editions\apply-edition.js --restore
+echo.
+echo Build failed. Review the messages above before retrying.
+echo Press any key to close this window...
+pause >nul
 exit /b 1
+

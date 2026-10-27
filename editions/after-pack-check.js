@@ -26,7 +26,19 @@ module.exports = async function afterPack(context) {
     if (A) listing = new Set(A.listPackage(asar).map((p) => String(p).replace(/\\/g, '/').replace(/^\//, '')));
   } else if (fs.existsSync(path.join(res, 'app'))) listing = walk(path.join(res, 'app'), path.join(res, 'app'), new Set());
   if (!listing) { console.warn('[zephyr] could not inspect the finished package (add @electron/asar to devDependencies to enable the check).'); return; }
-  const missing = required.filter((f) => !listing.has(f));
+  const missing = required.filter((f) => {
+  if (listing.has(f)) return false;
+
+  // These files are deliberately copied beside the executable by extraFiles.
+  if (
+    ['README.md', 'setup-tools.ps1'].includes(f) &&
+    fs.existsSync(path.join(context.appOutDir, f))
+  ) {
+    return false;
+  }
+
+  return true;
+});
   if (missing.length) {
     throw new Error('The package is MISSING ' + missing.length + ' file(s) the app needs:\n  ' + missing.join('\n  ') + '\nRun "node editions/fix-build-files.js" and build again. (Build stopped so a broken installer is not produced.)');
   }

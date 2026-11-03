@@ -52,7 +52,7 @@ function buildSection(edition, existing) {
       { ext: EXT.playlist, name: 'Playlist', description: 'Playlist', role: 'Viewer' }
     ],
     win: {
-      target: [{ target: 'nsis', arch: legacy ? ['ia32', 'x64'] : ['x64'] }, { target: 'portable', arch: ['x64'] }],
+      target: [{ target: 'nsis', arch: legacy && process.env.ZEPHYR_IA32 === '1' ? ['ia32', 'x64'] : ['x64'] }, { target: 'portable', arch: ['x64'] }],
       artifactName: 'ZephyrPlayer-${version}-' + edition + '-${arch}.${ext}'
     },
     nsis: { oneClick: false, perMachine: false, allowToChangeInstallationDirectory: true, deleteAppDataOnUninstall: false, shortcutName: 'ZephyrPlayer', include: 'build/installer.nsh' }

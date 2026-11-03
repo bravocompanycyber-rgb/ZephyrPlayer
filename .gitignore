@@ -44,3 +44,6 @@ package.json.edition-backup
 tools-versions.json
 mpv-version.txt
 build/tools-*/
+# generated / local-only
+*.bak-before-fix
+*.edition-backup

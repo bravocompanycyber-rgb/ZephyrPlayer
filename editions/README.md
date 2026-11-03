@@ -5,7 +5,7 @@ One code base, two installers:
 | Edition | For | Electron | Notes |
 |---|---|---|---|
 | **modern** | Windows 10 / 11 | whatever your `package.json` already uses | Deno for YouTube |
-| **legacy** | Windows 7 / 8 / 8.1 (runs on 10 / 11 too) | **22.3.27** (pinned) | QuickJS for YouTube, 32-bit and 64-bit installers |
+| **legacy** | Windows 7 / 8 / 8.1 (runs on 10 / 11 too) | **22.3.27** (pinned) | QuickJS for YouTube; **64-bit** installer (set `ZEPHYR_IA32=1` for a 32-bit one too); mpv is found on the target PC |
 
 Electron 23 and newer do not start on Windows 7 / 8 / 8.1, and Electron 22 is the last line that does. That is the only reason for a separate legacy build.
 
@@ -50,3 +50,6 @@ You can also run the merge on its own: `node editions/apply-edition.js legacy` a
 * Keep legacy and modern update feeds separate if you publish updates, otherwise a legacy PC could be offered a modern build it cannot run.
 
 * The generated `build/installer.nsh` makes the installer ask "already installed, this will UPDATE it" when an older version is present (silent installs just continue).
+
+* `README.md` and `setup-tools.ps1` ship NEXT TO the exe (not inside app.asar). The build guard only warns if they are missing there; the app files inside the archive are checked strictly.
+* `build-release.bat legacy` deletes any old mpv from `build\tools-legacy` first, so a Windows-10 mpv from an earlier run can never end up in a legacy installer.

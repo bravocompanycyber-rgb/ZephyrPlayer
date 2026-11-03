@@ -1,5 +1,9 @@
 # ZephyrPlayer upgrade v6
 
+## Fixed after the first real build on your PC
+- The build guard wrongly failed with "MISSING README.md, setup-tools.ps1": those two ship next to the exe, not inside the archive. The guard now checks them beside the exe and only warns.
+- Legacy builds are 64-bit by default (the bundled tools are 64-bit) and always start with no mpv in the bundle. `clean-strays` also removes stray screenshots and `*.bak-before-fix` files.
+
 ## Newest: found from the real logs
 - **Root cause of "mpv hiccups, mkv never plays" on the Windows 8.1 PC:** the logs show EVERY mpv start exits with 0xC0000139 (entry point not found): the bundled mpv.exe is a Windows-10 build. The app now detects this instantly, stops retrying, says so, and **finds an mpv that runs on that PC** (tests real builds, binary search, pinned). The legacy installer no longer packs mpv.
 - **Discs:** DVD (with menus) and Blu-ray (main movie + titles) from folders, drives and .iso/.img images. Blu-ray Java menus and AACS copy protection are not supported.

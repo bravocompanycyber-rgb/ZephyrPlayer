@@ -13,8 +13,8 @@ function walk(dir, base, out) {
 }
 
 module.exports = async function afterPack(context) {
-  let required;
-  try { required = JSON.parse(fs.readFileSync(path.join(__dirname, 'required-files.json'), 'utf8')).files; }
+  let required; let external = [];
+  try { const j = JSON.parse(fs.readFileSync(path.join(__dirname, 'required-files.json'), 'utf8')); required = j.files; external = j.external || []; }
   catch { console.warn('[zephyr] editions/required-files.json not found: run "node editions/fix-build-files.js" once. Skipping the completeness check.'); return; }
   const res = path.join(context.appOutDir, 'resources');
   const asar = path.join(res, 'app.asar');
@@ -29,6 +29,11 @@ module.exports = async function afterPack(context) {
   const missing = required.filter((f) => !listing.has(f));
   if (missing.length) {
     throw new Error('The package is MISSING ' + missing.length + ' file(s) the app needs:\n  ' + missing.join('\n  ') + '\nRun "node editions/fix-build-files.js" and build again. (Build stopped so a broken installer is not produced.)');
+  }
+  // files that ship next to the exe (extraFiles) are not inside the archive: look beside the exe; a missing one is a warning, not a failed build
+  for (const f of external) {
+    if (listing.has(f)) continue;
+    if (!fs.existsSync(path.join(context.appOutDir, f)) && !fs.existsSync(path.join(res, f))) console.warn('[zephyr] warning: ' + f + ' was not copied next to the exe (add it to build.extraFiles; the in-app tool installer needs setup-tools.ps1).');
   }
   console.log('[zephyr] package check passed: all ' + required.length + ' required files are inside.');
 };

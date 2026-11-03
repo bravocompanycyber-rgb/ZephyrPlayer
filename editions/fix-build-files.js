@@ -54,8 +54,13 @@ function requiredFiles(root) {
     while ((m = re.exec(src))) { const u = m[1]; if (/^(https?:|data:|file:|\/\/)/i.test(u)) continue; if (fs.existsSync(path.join(root, u))) files.add(norm(u)); }
   }
   // the icon files the app loads by name, the installer script the in-app tool installer runs, and the docs it opens
-  for (const f of ['assets/icons/play.svg', 'assets/icons/zephyrplayer.ico', 'setup-tools.ps1', 'README.md']) if (fs.existsSync(path.join(root, f))) files.add(f);
+  for (const f of ['assets/icons/play.svg', 'assets/icons/zephyrplayer.ico']) if (fs.existsSync(path.join(root, f))) files.add(f);
   return Array.from(files).sort();
+}
+
+/** Files that ship NEXT TO the exe (electron-builder "extraFiles"), not inside app.asar: the in-app tool installer script and the guide. */
+function externalFiles(root) {
+  return ['setup-tools.ps1', 'README.md'].filter((f) => fs.existsSync(path.join(root || ROOT, f)));
 }
 
 /* ---- tiny glob matcher with electron-builder style ordering ("!" removes again) ---- */
@@ -128,10 +133,10 @@ function main(argv) {
       console.log('   saved (backup: ' + path.basename(bak) + ')');
     }
   }
-  if (!check) fs.writeFileSync(path.join(__dirname, 'required-files.json'), JSON.stringify({ files: req }, null, 2) + '\n');
+  if (!check) fs.writeFileSync(path.join(__dirname, 'required-files.json'), JSON.stringify({ files: req, external: externalFiles(ROOT) }, null, 2) + '\n');
   console.log('\nThe app needs ' + req.length + ' files. ' + (check ? (problems ? 'Run without --check to fix.' : 'All good.') : 'Now build the installer again.'));
   return check && problems ? 1 : 0;
 }
 
 if (require.main === module) process.exit(main(process.argv));
-module.exports = { requiredFiles, isIncluded, globToRegex, fixPackage };
+module.exports = { externalFiles, requiredFiles, isIncluded, globToRegex, fixPackage };

@@ -9,4 +9,6 @@ let out = run(); assert(/3 stray/.test(out) && /player\.js.*ROOT copy is NEWER/.
 out = run('--fix'); assert(!fs.existsSync(path.join(proj, 'player.js')) && !fs.existsSync(path.join(proj, 'features.js')) && !fs.existsSync(path.join(proj, 'dom.test.js')) && fs.existsSync(path.join(proj, 'main.js')), 'strays removed, real root files kept');
 assert.strictEqual(fs.readFileSync(path.join(proj, 'js', 'player.js'), 'utf8'), 'NEWER ROOT COPY', 'a newer root copy is moved into js/ first (no work lost)');
 assert(/bak-before-fix/.test(fs.readFileSync(path.join(proj, '.gitignore'), 'utf8')), '.gitignore updated'); assert(/clean/.test(run()), 'second run: clean');
+fs.mkdirSync(path.join(proj, 'assets', 'icons'), { recursive: true }); fs.writeFileSync(path.join(proj, 'assets', 'icons', 'shot-home.png'), 'x'); fs.writeFileSync(path.join(proj, 'package-legacy.json.bak-before-fix'), '{}');
+out = run(); assert(/shot-home\.png/.test(out) && /bak-before-fix/.test(out), 'reports screenshots and backups'); run('--fix'); assert(!fs.existsSync(path.join(proj, 'assets', 'icons', 'shot-home.png')) && !fs.existsSync(path.join(proj, 'package-legacy.json.bak-before-fix')), 'leftovers removed'); assert(/\*\.bak-before-fix/.test(fs.readFileSync(path.join(proj, '.gitignore'), 'utf8')));
 console.log('clean-strays OK');

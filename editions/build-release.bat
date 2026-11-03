@@ -36,6 +36,7 @@ if "%SKIPTOOLS%"=="0" (
   echo Fetching the %ED% tools into build\tools-%ED% ...
   set ONLYARG=
   if /i "%ED%"=="legacy" (
+    del /q "build\tools-legacy\mpv.exe" "build\tools-legacy\mpv.com" "build\tools-legacy\mpv-compat.json" "build\tools-legacy\d3dcompiler_43.dll" "build\tools-legacy\vulkan-1.dll" "build\tools-legacy\libmpv-2.dll" 2>nul
     set ONLYARG=-Only ytdlp,js,ffmpeg,whisper
     echo NOTE: mpv is NOT packed into the legacy installer. The newest mpv builds do not start on Windows 7 / 8 / 8.1, and this PC cannot test that.
     echo       ZephyrPlayer tests real mpv builds on the target PC the first time it needs mpv and installs the newest one that runs there.

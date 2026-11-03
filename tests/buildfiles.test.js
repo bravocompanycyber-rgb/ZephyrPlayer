@@ -19,9 +19,10 @@ assert(/nothing to add/.test(F.fixPackage({ name: 'z' }, req).notes[0]), 'no lis
   let asar; try { asar = require('@electron/asar'); } catch { try { asar = require('asar'); } catch {} }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'zap-')); const app = path.join(tmp, 'app'); const resDir = path.join(tmp, 'out', 'resources'); fs.mkdirSync(resDir, { recursive: true });
   for (const f of req) { const t = path.join(app, f); fs.mkdirSync(path.dirname(t), { recursive: true }); fs.copyFileSync(path.join(H.ROOT, f), t); }
-  fs.writeFileSync(path.join(H.ROOT, 'editions', 'required-files.json'), JSON.stringify({ files: req }));
+  assert(!req.includes('setup-tools.ps1') && !req.includes('README.md'), 'files shipped next to the exe are not required INSIDE the archive'); assert.deepStrictEqual(F.externalFiles(H.ROOT).sort(), ['README.md', 'setup-tools.ps1'].filter((f) => fs.existsSync(path.join(H.ROOT, f))).sort());
+  fs.writeFileSync(path.join(H.ROOT, 'editions', 'required-files.json'), JSON.stringify({ files: req, external: ['setup-tools.ps1', 'README.md'] }));
   if (!asar) { console.log('SKIP asar part: @electron/asar not installed'); process.exit(0); }
-  await asar.createPackage(app, path.join(resDir, 'app.asar')); await AP({ appOutDir: path.join(tmp, 'out') }); console.log('complete package passes the guard');
+  await asar.createPackage(app, path.join(resDir, 'app.asar')); await AP({ appOutDir: path.join(tmp, 'out') }); console.log('complete package passes the guard (missing next-to-exe files only warn: this is the case that blocked a real build)');
   fs.unlinkSync(path.join(app, 'mpv-session.js')); fs.rmSync(path.join(resDir, 'app.asar')); await asar.createPackage(app, path.join(resDir, 'app.asar'));
   await assert.rejects(() => AP({ appOutDir: path.join(tmp, 'out') }), /MISSING 1 file.*mpv-session\.js.*fix-build-files/s); console.log('package missing mpv-session.js is REJECTED at build time');
   // the CLI on a copy of a project (explicit old list, like yours)

@@ -7,7 +7,7 @@ const w = dom.window;
 const calls = []; const listeners = {};
 const sub = (n) => (cb) => { listeners[n] = cb; return () => {}; };
 w.electronAPI = new Proxy({
-  getPathForFile: f => f.path || '', expandPaths: async (p) => ({ media: p.filter(x => !/\.srt$/.test(x)).map(x => ({ path: x, name: x.split('/').pop(), size: 10 })), subs: p.filter(x => /\.srt$/.test(x)) }),
+  getPathForFile: f => f.path || '', expandPaths: async (p) => ({ media: p.filter(x => !/\.srt$|\.iso$|VIDEO_TS$/.test(x)).map(x => ({ path: x, name: x.split('/').pop(), size: 10 })), subs: p.filter(x => /\.srt$/.test(x)), discs: p.filter(x => /\.iso$|VIDEO_TS$/.test(x)).map(x => ({ type: /bd/i.test(x) ? 'bd' : 'dvd', path: x, name: x.split('/').pop(), image: /\.iso$/.test(x) })) }),
   sidecarSubs: async () => ({ subs: [] }), readSubtitle: async () => ({ ok: true, bytes: new TextEncoder().encode('1\n00:00:01,000 --> 00:00:02,000\nHi') }),
   probeMedia: async (p) => /x265/.test(p) ? { ok: true, duration: 6000, size: 2e9, width: 1920, height: 1080, hasVideo: true, vcodec: 'hevc', acodec: 'aac', bitDepth: 10, audioTracks: 1, subTracks: 0 } : /bluray|\.dts\./.test(p) ? { ok: true, duration: 7200, size: 3e9, width: 1920, height: 1080, hasVideo: true, vcodec: 'h264', acodec: /dts/.test(p) ? 'dts' : 'ac3', bitDepth: 8, audioTracks: 2, subTracks: 1 } : /missing/.test(p) ? { ok: false, error: 'missing' } : /hevc/.test(p) ? { ok: true, duration: 5400, size: 2e9, width: 1920, height: 1080, hasVideo: true, vcodec: 'hevc', acodec: 'ac3', bitDepth: 10, audioTracks: 2, subTracks: 3, hdr: 'HDR10' } : /song/.test(p) ? { ok: true, duration: 200, hasVideo: false, acodec: 'mp3', title: 'Real Title', artist: 'Band' } : { ok: true, duration: 600, size: 1e8, width: 1280, height: 720, hasVideo: true, vcodec: 'h264', acodec: 'aac', bitDepth: 8, audioTracks: 1, subTracks: 0 },
   thumbMedia: async (p) => ({ ok: true, path: '/cache/' + p.split('/').pop() + '.jpg' }),
@@ -18,6 +18,9 @@ w.electronAPI = new Proxy({
   fixAudio: async (f) => { calls.push(['fixaudio', f]); return { ok: true, path: '/cache/conv-fixed.mp4', size: 5e6 }; },
   onFixProgress: () => () => {},
   clearHistory: async () => { calls.push(['clearhist']); return { ok: true }; },
+  onMpvCompat: (cb) => { listeners.compat = cb; return () => {}; },
+  mpvFindCompatible: async () => { calls.push(['compat']); return { ok: true, tag: '20230101' }; },
+  openDiscImage: async () => ({ ok: true, path: '/discs/My Movie.iso' }),
   externalList: async () => ({ ok: true, players: [{ id: 'mpc-hc', name: 'MPC-HC', path: 'C:/Program Files (x86)/K-Lite Codec Pack/MPC-HC64/mpc-hc64.exe', klite: true }, { id: 'vlc', name: 'VLC media player', path: 'C:/vlc.exe' }] }),
   externalOpen: async (o) => { calls.push(['extopen', o]); return { ok: true }; },
   assocStatus: async () => ({ ok: true, registered: 3, total: 40 }), assocRegister: async (sel) => { calls.push(['assoc', sel]); return { ok: true }; }, assocUnregister: async () => ({ ok: true }),
@@ -301,7 +304,6 @@ const key = (k, extra = {}) => w.document.dispatchEvent(new w.KeyboardEvent('key
   // ================= Blu-ray style file (AC-3 audio) with no mpv: clear offers instead of silence =================
   const calls2 = calls; await listeners.status({ available: false }); await sleep(30); assert.strictEqual(w.ZApp.mpvReady, false, 'simulating a PC without mpv');
   d.getElementById('clearPlaylistBtn').click(); await sleep(30);
-  w.electronAPI.probeMedia = w.electronAPI.probeMedia;      // (stub below answers for the AC-3 file)
   await listeners.open(['/m/bluray.ac3.movie.mp4']); await sleep(900);
   const fbn = d.getElementById('failBanner'); assert(!fbn.hidden, 'a banner explains the silence'); assert(/No sound/.test(fbn.textContent) && /Dolby Digital \(AC-3\)/.test(fbn.textContent) && /Blu-ray/.test(fbn.textContent), fbn.textContent);
   const bl = Array.from(fbn.querySelectorAll('button')).map((b) => b.textContent); assert(bl.some((x) => /Fix sound/.test(x)) && bl.some((x) => /Download mpv/.test(x)) && bl.some((x) => /Open in MPC-HC \(K-Lite\)/.test(x)), 'offers: ' + bl.join(' | '));
@@ -330,6 +332,44 @@ const key = (k, extra = {}) => w.document.dispatchEvent(new w.KeyboardEvent('key
   // the settings button does it with a two-click confirmation
   w.localStorage.setItem('zephyr-continue-v1', '[{"k":"y","pos":9,"dur":99,"name":"y","at":2}]'); d.getElementById('settingsBtn').click(); await sleep(40); d.querySelector('#scNav [data-group="library"]').click();
   const hbtn = Array.from(d.querySelectorAll('#scBody .sactions button')).find((b) => /Clear watch history/.test(b.textContent)); assert(hbtn, 'button exists in Settings > Library'); hbtn.click(); assert(/confirm/i.test(hbtn.textContent) && w.localStorage.getItem('zephyr-continue-v1') !== null, 'first click only asks'); hbtn.click(); assert.strictEqual(w.localStorage.getItem('zephyr-continue-v1'), null); d.getElementById('scClose').click();
+  // ================= extra volume INSIDE the built-in player (no new window): zmedia + Web Audio gain, with safe fallbacks =================
+  const gainNode = { gain: { value: 1 } }; let srcCount = 0; let silentOutput = false;
+  w.AudioContext = class { constructor() { this.state = 'running'; this.destination = {}; } createMediaElementSource() { srcCount++; return { connect() {} }; } createGain() { return Object.assign(gainNode, { connect() {} }); } createDynamicsCompressor() { return { threshold: { value: 0 }, knee: { value: 0 }, ratio: { value: 1 }, attack: { value: 0 }, release: { value: 0 }, connect() {} }; } createAnalyser() { return { fftSize: 0, connect() {}, getByteTimeDomainData(b) { b.fill(silentOutput ? 128 : 140); } }; } resume() { return Promise.resolve(); } };
+  await listeners.status({ available: true }); w.ZSettings.set('volumeMax', 200); w.ZSettings.set('boostEngine', 'browser');
+  // 1) the preflight request fails (zmedia not working): never silence, never a half state: it falls back to mpv
+  w.fetch = async () => ({ ok: false, status: 403, arrayBuffer: async () => new ArrayBuffer(0) }); d.getElementById('clearPlaylistBtn').click(); await sleep(30); await listeners.open(['/m/boost.one.mp4']); await sleep(700); calls.length = 0;
+  w.ZApp.setVolume(1.5); await sleep(300); assert(calls.some((c) => c[0] === 'play' && c[1].volume === 150), 'failed preflight -> mpv with 150%'); assert.strictEqual(srcCount, 0, 'no audio graph was created for a source that is not CORS-clean');
+  // 2) the preflight succeeds: boosted in this window, no mpv, no new window
+  w.fetch = async (url, o) => { calls.push(['zfetch', url, o && o.headers && o.headers.Range]); return { ok: true, status: 206, arrayBuffer: async () => new ArrayBuffer(16) }; };
+  await listeners.status({ available: true }); d.getElementById('clearPlaylistBtn').click(); await sleep(30); await listeners.open(['/m/boost two.mp4']); await sleep(700); calls.length = 0; w.ZApp.setVolume(1.5); await sleep(300);
+  assert(vid.getAttribute('src').startsWith('zmedia://local/') && decodeURIComponent(vid.getAttribute('src')).endsWith('/m/boost two.mp4'), 'the file is read through zmedia: ' + vid.getAttribute('src')); assert.strictEqual(vid.getAttribute('crossorigin'), 'anonymous', 'CORS-clean element');
+  assert(!calls.some((c) => c[0] === 'play'), 'NO mpv window was opened'); assert(calls.some((c) => c[0] === 'zfetch' && c[2] === 'bytes=0-1023'), 'preflight ran'); assert.strictEqual(srcCount, 1); assert.strictEqual(gainNode.gain.value, 1.5, 'gain stage carries the volume'); assert.strictEqual(vid.volume, 1, 'element volume stays at 100%');
+  w.ZApp.setVolume(0.5, { silent: true }); assert.strictEqual(gainNode.gain.value, 0.5); w.ZApp.toggleMute(); assert.strictEqual(gainNode.gain.value, 0, 'mute works through the graph'); w.ZApp.toggleMute(); assert.strictEqual(gainNode.gain.value, 0.5); w.ZApp.setVolume(1.8, { silent: true }); assert.strictEqual(gainNode.gain.value, 1.8, 'up to the configured maximum');
+  // 3) once boost is on, the next files also go through zmedia (a source that is not CORS-clean would be silent in a graph)
+  await listeners.open(['/m/next.file.mp4']); await sleep(700); assert(vid.getAttribute('src').startsWith('zmedia://local/'), 'following files stay CORS-clean'); assert.strictEqual(srcCount, 1, 'the graph is created once per element');
+  // 4) the user can still choose mpv for extra volume
+  delete w.AudioContext; delete w.fetch; w.ZSettings.reset('boostEngine'); w.ZSettings.reset('volumeMax');
+  // ================= the real-world case from the logs: mpv.exe cannot START on this Windows (0xC0000139) =================
+  await listeners.status({ available: true }); w.ZApp.setMpvIncompatible(false); d.getElementById('failBanner').hidden = true;
+  listeners.compat({ ok: false, code: 3221225785, startup: true }); await sleep(60); const sb2 = d.getElementById('failBanner'); assert(!sb2.hidden && /mpv cannot run on this Windows \(error 0xC0000139\)/.test(sb2.textContent) && /Find an mpv that works on this PC/.test(sb2.textContent), 'start-up probe tells the user at once: ' + sb2.textContent);
+  assert.strictEqual(w.ZApp.mpvReady, false, 'mpv is not used while it cannot start'); await listeners.status({ available: true }); assert.strictEqual(w.ZApp.mpvReady, false, 'a later "mpv exists" status does not switch it back on');
+  d.getElementById('clearPlaylistBtn').click(); await sleep(30); w.ZApp.setMpvIncompatible(false); await listeners.status({ available: true }); await listeners.open(['/m/Dr.No.1962.720p.BluRay.x265.mkv']); await sleep(900);
+  listeners.event({ type: 'failed', error: 'mpv.exe cannot run on this Windows: a Windows function it needs does not exist on this version of Windows (error 0xC0000139)', incompatible: true, code: 3221225785 }); await sleep(300);
+  assert(!vid.getAttribute('src'), 'HEVC is never given to the browser engine'); const sb3 = d.getElementById('failBanner'); assert(!sb3.hidden && /cannot run on this version of Windows/.test(sb3.textContent), sb3.textContent); assert(!/Download mpv/.test(sb3.textContent), 'a fresh download of the same kind of build would not help');
+  calls.length = 0; Array.from(sb3.querySelectorAll('button')).find((b) => /Find an mpv that works/.test(b.textContent)).click(); await sleep(900);
+  assert(calls.some((c) => c[0] === 'compat'), 'runs the on-this-PC search'); assert.strictEqual(w.ZApp.mpvIncompatible, false); assert.strictEqual(w.ZApp.mpvReady, true); assert(calls.some((c) => c[0] === 'play' && /x265\.mkv$/.test(c[1].files[0])), 'then the file plays with the working mpv');
+  // ================= DVD / Blu-ray: drop an image or folder, play it with mpv, disc menu controls =================
+  await listeners.status({ available: true }); w.ZApp.setMpvIncompatible(false); d.getElementById('failBanner').hidden = true; d.getElementById('clearPlaylistBtn').click(); await sleep(30); calls.length = 0;
+  await listeners.open(['/discs/Movie Night.iso', '/discs/Concert bd.iso', '/discs/Disc3/VIDEO_TS']); await sleep(900);
+  const dn = w.ZApp.playlist.map((i) => i.name); assert.strictEqual(JSON.stringify(dn), JSON.stringify(['DVD: Movie Night', 'Blu-ray: Concert bd', 'DVD: VIDEO_TS']), 'discs become one playlist item each: ' + dn);
+  const dc = calls.find((c) => c[0] === 'play'); assert(dc && JSON.stringify(dc[1].files) === '[]' && dc[1].disc.type === 'dvd' && dc[1].disc.path === '/discs/Movie Night.iso', 'mpv is started with the disc, not a file: ' + JSON.stringify(dc && dc[1].disc));
+  assert(!vid.getAttribute('src'), 'never given to the browser engine'); assert(w.ZApp.playlist.every((i) => i.forceMpv && !i.stream));
+  vid.dispatchEvent(new w.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 100 })); const dz = d.querySelector('.zctx'); assert(dz && /DVD menu/.test(dz.textContent) && /Disc menu/.test(dz.textContent) && /Next title/.test(dz.textContent) && /Select/.test(dz.textContent), 'disc controls in the right-click menu');
+  calls.length = 0; Array.from(dz.querySelectorAll('.zitem')).find((b) => /^Disc menu/.test(b.textContent.trim())).click(); await sleep(40); assert(calls.some((c) => c[0] === 'cmd' && c[1] === 'discnav' && c[2][0] === 'menu'), 'sends the disc menu command to mpv');
+  calls.length = 0; vid.dispatchEvent(new w.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 100 })); Array.from(d.querySelectorAll('.zctx .zitem')).find((b) => /Next title/.test(b.textContent)).click(); await sleep(40); assert(calls.some((c) => c[0] === 'cmd' && c[1] === 'add' && c[2][0] === 'disc-title' && c[2][1] === 1), 'next title');
+  calls.length = 0; w.ZApp.openDisc(); await sleep(700); assert(w.ZApp.playlist.some((i) => i.name === 'DVD: My Movie'), 'Open disc image... adds the chosen image'); listeners.hotkey('opendisc'); await sleep(300);
+  // without mpv the disc is not attempted in the browser: a clear explanation and the other players
+  await listeners.status({ available: false }); d.getElementById('clearPlaylistBtn').click(); await sleep(30); await listeners.open(['/discs/Other.iso']); await sleep(700); const nb = d.getElementById('failBanner'); assert(!nb.hidden && /Playing a DVD disc needs mpv/.test(nb.textContent) && /Open in VLC/.test(nb.textContent), nb.textContent);
   assert.strictEqual(JSON.stringify(errs), JSON.stringify([]));
   console.log('DOM SMOKE TEST PASSED'); process.exit(0);
 })().catch(e => { console.error('FAIL', e, errs); process.exit(1); });

@@ -74,6 +74,21 @@ Auto-loads `.srt .vtt .ass .ssa` files next to the video (also non-UTF-8 files),
 Load more by dropping a subtitle file. **Generate subtitles with AI** (whisper, runs on your PC; installed by `setup-tools.bat`) from the subtitle menu.
 Delay, size and style are adjustable live.
 
+## 4c. Discs: DVD and Blu-ray
+
+Drop a **disc image (.iso / .img)**, a **DVD / Blu-ray folder** (VIDEO_TS or BDMV), or a **drive with a disc in it**; or use File > *Open DVD / Blu-ray disc image...* (Ctrl+Shift+D).
+Each disc is one playlist item (`DVD: ...` / `Blu-ray: ...`), played by mpv in its own window.
+* **DVD:** menus work (mpv's own mouse and keys drive them). Right-click the picture for *Disc menu, Select, Up/Down/Left/Right, Next/Previous title*.
+* **Blu-ray:** the main movie and title switching work. **Blu-ray menus (Java / BD-J) and copy-protected (AACS / BD+) discs are not supported**, same as most free players: use MakeMKV to make an .mkv first.
+* Disc support needs mpv. If mpv cannot run on your Windows, see section 5i.
+
+## 5i. "mpv cannot run on this Windows" (Windows 7 / 8 / 8.1)
+
+Newer mpv builds are made for Windows 10. On older Windows they stop instantly with error **0xC0000139** (a Windows function does not exist), and no setting can fix that.
+ZephyrPlayer now notices at start-up, says so, and offers **Find an mpv that works on this PC**: it tests real builds on that PC (newest first, searching the release history)
+and installs the newest one that starts. It is remembered, and a later "update" never swaps in a build that cannot run. The legacy installer therefore does not pack mpv.
+If no build runs there, the banner offers your other players (VLC, PotPlayer, MPC-HC). Needs internet once; it can download a few builds (a few hundred MB at most).
+
 ## 5b. Settings (Basic to Advanced, with explanations)
 
 Open the gear (or press **Ctrl+,**). Settings are grouped: **General, Playback, Audio & volume, Video & performance, Subtitles, Keys & mouse,
@@ -92,7 +107,7 @@ turn on **Show advanced settings**; the defaults are already good, so most peopl
 * Volume goes **up to 300%** (default maximum 200%; change it under Audio & volume). Mouse wheel and arrow keys change it by a step you choose.
 * Above 100% the **soft limiter** (on by default) stops peaks from crackling. **Even out loudness** makes quiet and loud videos similar;
   **Night mode** softens explosions and lifts whispers.
-* The browser engine cannot exceed 100%, so asking for more volume hands the file to **mpv** automatically at the same position.
+* **Extra volume works inside the built-in player** (no extra window): local files are read through a private app protocol so a gain stage with a soft limiter can go above 100%. If that cannot work, it falls back to mpv. Settings > Audio > *Extra volume uses* lets you prefer mpv (loudness evening and night mode need mpv).
 
 ## 5d. Keys and mouse
 
@@ -230,6 +245,8 @@ A "Cannot find module" error box left open after a failed start can leave helper
 | A tool shows Missing after installing | Press Re-check; if you copied files by hand keep them in the project root (ffmpeg in `ffmpeg\`). |
 | The installed app shows a "Cannot find module" or "incomplete installation" error | The installer was built with a file list that misses newer files. On the build PC run `node editions/fix-build-files.js` once, then build again. It repairs `package.json` / `package-legacy.json` and adds a build-time check that refuses to produce a broken installer. |
 | A Blu-ray rip (mp4/mkv) has picture but **no sound**, or **extra volume** does nothing | The built-in player cannot decode AC-3 / DTS / TrueHD audio, and extra volume needs mpv. ZephyrPlayer now shows a banner: **Fix sound (keeps the video)** converts only the audio (about a minute or two, video untouched, saved so it is instant next time), **Download mpv (free)** installs the player that handles every format and extra volume, or **Open in VLC / PotPlayer / MPC-HC**. |
+| The File / View / Help menu is hidden until I press Alt | Settings > General > *Always show the menu bar* (on by default now). |
+| Buttons do nothing / odd behaviour after copying files | Files saved into the project ROOT instead of `js/` or `tests/` (the chat saves file cards without folders). Run `node editions/clean-strays.js` to see them, `--fix` to remove them. |
 | Something else | Help > Copy diagnostics and paste it in your report. Logs: File > Open log folder. |
 
 ## 12. Privacy

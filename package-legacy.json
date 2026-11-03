@@ -58,7 +58,10 @@
       "media-probe.js",
       "media-tools.js",
       "online-meta.js",
-      "tool-updates.js"
+      "tool-updates.js",
+      "disc-utils.js",
+      "media-range.js",
+      "mpv-compat.js"
     ],
     "win": {
       "icon": "assets/icons/zephyrplayer.ico",

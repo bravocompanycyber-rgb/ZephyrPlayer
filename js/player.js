@@ -183,6 +183,11 @@
       path: m.path, url: pathToFileUrl(m.path), subPath: m.subPath || null, addedAt: Date.now()
     };
   }
+  function makeDiscItem(d) {
+    const label = (d.type === 'bd' ? 'Blu-ray: ' : 'DVD: ') + String(d.name || '').replace(/\.(iso|img)$/i, '');
+    return { name: label, fullName: d.name || label, size: 0, type: '', path: d.path, url: '', disc: { type: d.type, path: d.path }, isDisc: true, forceMpv: true,
+      info: { hasVideo: true, vcodec: 'mpeg2video', acodec: 'ac3', duration: 0, audioTracks: 1, subTracks: 0 }, addedAt: Date.now() };
+  }
   function makeStreamItem(url, title, duration) {
     const label = title || (url.length > 70 ? url.slice(0, 67) + '…' : url);
     return { name: label, fullName: url, size: 0, type: '', path: null, url, stream: true, duration: duration || 0, addedAt: Date.now() };
@@ -295,14 +300,21 @@
     const a = api();
     paths = (paths || []).filter(p => typeof p === 'string' && p);
     if (!paths.length) return;
-    let media = [], subs = [], streams = [];
+    let media = [], subs = [], streams = [], discs = [];
     if (a && a.expandPaths) {
       const r = await a.expandPaths(paths).catch(() => null);
-      if (r) { media = r.media || []; subs = r.subs || []; streams = r.streams || []; }
+      if (r) { media = r.media || []; subs = r.subs || []; streams = r.streams || []; discs = r.discs || []; }
     } else {
       media = paths.map(p => ({ path: p, name: p.split(/[/\\]/).pop(), size: 0 }));
     }
-    if (!media.length && !subs.length && !streams.length) { showOSD('No playable media found'); return; }
+    if (!media.length && !subs.length && !streams.length && !discs.length) { showOSD('No playable media found'); return; }
+    let firstDisc = -1;                                           // DVD / Blu-ray folders and disc images
+    for (const d of discs) {
+      const ex = playlist.findIndex((i) => i.disc && i.disc.path === d.path);
+      if (ex >= 0) { if (firstDisc < 0) firstDisc = ex; continue; }
+      playlist.push(makeDiscItem(d));
+      if (firstDisc < 0) firstDisc = playlist.length - 1;
+    }
     // links found in playlist files (.m3u / .pls) or dropped as text
     let firstStream = -1;
     for (const st of streams) {
@@ -328,6 +340,8 @@
     if (!media.length && subs.length) { loadSubFromPath(subs[0]); return; }
     if (media.length > 1) showOSD(media.length + ' files added');
     if (firstIdx < 0 && firstStream >= 0) firstIdx = firstStream;
+    if (firstIdx < 0 && firstDisc >= 0) firstIdx = firstDisc;
+    if (discs.length) { renderPlaylist(); if (discs.length > 1) showOSD(discs.length + ' discs added'); }
     if (streams.length) { renderPlaylist(); if (streams.length > 1) showOSD(streams.length + ' links added'); }
     if (firstIdx >= 0 && (opts.play || currentIndex === -1)) playIndex(firstIdx);
     savePlaylistSoon();
@@ -754,7 +768,8 @@
     loader.hidden = false;
     pendingStart = start || 0;
     video.muted = userMuted;
-    video.src = item.altUrl || item.url;                      // altUrl = the converted copy ("Fix sound")
+    if (boost.mode) video.crossOrigin = 'anonymous'; else video.removeAttribute('crossorigin');
+    video.src = localUrl(item);                               // altUrl = the converted copy ("Fix sound"); zmedia:// once extra volume is on
     video.playbackRate = clamp(speedRate, 0.25, 4);
     if (!item.altUrl && item.info && !browserCanPlay(item.info) && (!mpvReady || item._htmlTried) && window.ZApp) window.ZApp.emit('nocodec', item, 'start');
     const p = video.play();
@@ -766,7 +781,8 @@
   }
   let pendingStart = 0;
   let mpvFailures = 0;
-  let mpvBroken = false;                 // installed, but it keeps failing on this PC (different from "not installed")
+  let mpvBroken = false;
+  let mpvIncompatible = false;           // mpv.exe cannot even START on this Windows (exit 0xC0000139 etc.): retrying settings is pointless                 // installed, but it keeps failing on this PC (different from "not installed")
 
   async function startMpvItem(item, start, token) {
     const a = api();
@@ -783,7 +799,7 @@
     durationEl.textContent = '0:00';
     if (typeof reportEmbedBounds === 'function') reportEmbedBounds();
 
-    const common = { quality: getQuality(), embed: true, startPos: start || 0, volume: Math.round(volumeLevel * 100), mute: userMuted };
+    const common = { quality: getQuality(), embed: true, startPos: item.disc ? 0 : (start || 0), volume: Math.round(volumeLevel * 100), mute: userMuted };
     let res;
     try {
       res = item.stream
@@ -791,7 +807,7 @@
             startPos: common.startPos, volume: common.volume, mute: common.mute, cookies: lsGet('zephyr-ytCookies') || '', cfg: window.ZApp ? window.ZApp.engineCfg() : undefined,
             vo: lsGet('zephyr-settingVo') || 'gpu', hwdec: lsGet('zephyr-settingHwdec') || 'auto', perf: lsGet('zephyr-settingPerf') || 'smooth'
           })
-        : await a.mpvPlayExternal(Object.assign({ files: [item.path], cfg: window.ZApp ? window.ZApp.engineCfg() : undefined,
+        : await a.mpvPlayExternal(Object.assign({ files: item.disc ? [] : [item.path], disc: item.disc || undefined, cfg: window.ZApp ? window.ZApp.engineCfg() : undefined,
             vo: lsGet('zephyr-settingVo') || 'gpu', hwdec: lsGet('zephyr-settingHwdec') || 'auto', perf: lsGet('zephyr-settingPerf') || 'smooth' }, common));
     } catch (e) { res = { ok: false, error: e && e.message }; }
     if (token !== loadToken) return;
@@ -1003,21 +1019,89 @@
   function setVolume(val, opts = {}) {
     val = clamp(Number(val) || 0, 0, volumeMax);
     volumeLevel = val;
-    video.volume = Math.min(1, val);
+    video.volume = boost.gain ? 1 : Math.min(1, val);
     volumeSlider.value = val;
     if (!opts.keepMute && val > 0) { userMuted = false; video.muted = false; if (isMpv() || opts.sync) mpvSet('mute', false); }
+    applyBoostGain();
     if (isMpv() || opts.sync) mpvSet('volume', Math.round(val * 100));
     updateMuteIcon();
     if (pref('rememberVolume', true)) lsSet('zephyr-volume', String(val));
-    if (!opts.silent) showOSD('Volume ' + Math.round(val * 100) + '%' + (val > 1 && !isMpv() && !(mpvReady && playlist[currentIndex] && playlist[currentIndex].path) ? ' (extra volume needs mpv)' : ''), 900);
-    // The browser engine cannot go above 100%: hand over to mpv (same position) the moment boost is requested.
+    if (!opts.silent) showOSD('Volume ' + Math.round(val * 100) + '%', 900);
     const it = playlist[currentIndex];
-    if (val > 1.001 && !isMpv() && it && !mpvReady && !it._needMpvShown && window.ZApp) { it._needMpvShown = true; window.ZApp.emit('needmpv', 'volume'); }
-    if (val > 1.001 && !isMpv() && it && it.path && mpvReady && !it._boostSwitched && video.getAttribute('src') && !opts.noSwitch) {
-      it._boostSwitched = true; it.forceMpv = true;
-      showOSD('Extra volume: switching to mpv…', 1800);
-      playIndex(currentIndex, { startPos: curTime(), noHistory: true });
+    if (val > 1.001 && !isMpv() && it && video.getAttribute('src') && !opts.noSwitch && !boost.mode) {
+      // The browser engine cannot go above 100% by itself: boost inside this window (Web Audio), else hand over to mpv.
+      if (canBoostInBrowser(it)) enableBoost(it).then((ok) => { if (!ok) boostFallback(it); });
+      else boostFallback(it);
     }
+  }
+
+  /* ---------- extra volume inside the built-in player ----------
+   * Local files are read through the app's private zmedia:// scheme (CORS + Range). A preflight request proves the element will be
+   * CORS-clean first; Web Audio would otherwise output SILENCE. After that, volume is a gain stage (with a soft limiter), so 100%+ works. */
+  const boost = { ctx: null, src: null, gain: null, comp: null, analyser: null, mode: false, busy: false };
+  const zmediaUrl = (p) => 'zmedia://local/' + encodeURIComponent(p);
+  function canBoostInBrowser(item) {
+    return !!(item && item.path && !item.stream && !item._boostFailed && (window.AudioContext || window.webkitAudioContext) && typeof fetch === 'function' && pref('boostEngine', 'browser') === 'browser' && browserSafe(item));
+  }
+  function localUrl(item) { return boost.mode && item.path ? zmediaUrl(item.altPath || item.path) : (item.altUrl || item.url); }
+  function applyBoostGain() {
+    if (!boost.gain) return;
+    boost.gain.gain.value = userMuted ? 0 : volumeLevel;          // an element's own volume/mute do not reach a Web Audio graph
+    if (boost.comp) { const on = pref('softLimiter', true); boost.comp.threshold.value = on ? -4 : 0; boost.comp.ratio.value = on ? 20 : 1; }
+    video.volume = 1;
+  }
+  async function enableBoost(item) {
+    if (boost.busy) return true;
+    boost.busy = true;
+    try {
+      const url = zmediaUrl(item.altPath || item.path);
+      const res = await fetch(url, { headers: { Range: 'bytes=0-1023' } });                  // CORS + Range preflight
+      if (!res.ok || (res.status !== 206 && res.status !== 200)) throw new Error('zmedia ' + res.status);
+      await res.arrayBuffer();
+      if (!boost.ctx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        boost.ctx = new AC();
+        boost.src = boost.ctx.createMediaElementSource(video);
+        boost.gain = boost.ctx.createGain();
+        boost.comp = boost.ctx.createDynamicsCompressor();
+        boost.comp.knee.value = 0; boost.comp.attack.value = 0.003; boost.comp.release.value = 0.2;
+        boost.analyser = boost.ctx.createAnalyser(); boost.analyser.fftSize = 256;
+        boost.src.connect(boost.gain); boost.gain.connect(boost.comp); boost.comp.connect(boost.ctx.destination); boost.comp.connect(boost.analyser);
+      }
+      if (boost.ctx.state === 'suspended') boost.ctx.resume().catch(() => {});
+      const t = video.currentTime, playing = !video.paused;
+      boost.mode = true;
+      video.crossOrigin = 'anonymous';
+      video.src = url;
+      video.addEventListener('loadedmetadata', function once() { video.removeEventListener('loadedmetadata', once); try { video.currentTime = t; } catch { /* ignore */ } if (playing) video.play().catch(() => {}); });
+      applyBoostGain();
+      showOSD('Extra volume ' + Math.round(volumeLevel * 100) + '% (built-in player)', 2000);
+      watchBoost(item);
+      return true;
+    } catch (e) {
+      item._boostFailed = true;
+      return false;
+    } finally { boost.busy = false; }
+  }
+  // If the graph stays silent for a long stretch while data is decoding, it is not working: use mpv instead (never leave the user with silence).
+  function watchBoost(item) {
+    let silentTicks = 0; const buf = new Uint8Array(boost.analyser.fftSize);
+    const timer = setInterval(() => {
+      if (playlist[currentIndex] !== item || !boost.mode || isMpv()) { clearInterval(timer); return; }
+      if (video.paused || userMuted || volumeLevel === 0) return;
+      boost.analyser.getByteTimeDomainData(buf);
+      let moving = false; for (let i = 0; i < buf.length; i++) if (buf[i] !== 128) { moving = true; break; }
+      silentTicks = moving ? 0 : silentTicks + 1;
+      if (silentTicks >= 14) { clearInterval(timer); item._boostFailed = true; boostFallback(item); }      // about 14 s of pure silence
+    }, 1000);
+  }
+  function boostFallback(it) {
+    if (!it) return;
+    if (mpvReady && it.path && !it._boostSwitched) {
+      it._boostSwitched = true; it.forceMpv = true;
+      showOSD('Extra volume: opening in mpv…', 1800);
+      playIndex(currentIndex, { startPos: curTime(), noHistory: true });
+    } else if (!mpvReady && !it._needMpvShown && window.ZApp) { it._needMpvShown = true; window.ZApp.emit('needmpv', 'volume'); }
   }
   function applyVolumeLimits() {
     volumeSlider.max = String(volumeMax);
@@ -1027,6 +1111,7 @@
   function toggleMute() {
     userMuted = !userMuted;
     video.muted = userMuted;
+    applyBoostGain();
     if (isMpv()) mpvSet('mute', userMuted);
     updateMuteIcon();
     showOSD(userMuted ? 'Muted' : 'Volume ' + Math.round(volumeLevel * 100) + '%', 900);
@@ -1521,7 +1606,7 @@
     }
     try {
       const st = await window.electronAPI.mpvAvailable();
-      mpvReady = !!st.available;
+      mpvReady = !!st.available && !mpvIncompatible;
       if (mpvStatus) {
         mpvStatus.textContent = mpvReady ? 'mpv ready' : 'mpv missing';
         mpvStatus.title = st.path || '';
@@ -1589,7 +1674,7 @@
   if (window.electronAPI) {
     if (window.electronAPI.onMpvStatus) {
       window.electronAPI.onMpvStatus((st) => {
-        mpvReady = !!st.available;
+        mpvReady = !!st.available && !mpvIncompatible;
         if (mpvStatus) {
           mpvStatus.textContent = mpvReady ? 'mpv ready' : 'mpv missing';
           mpvStatus.style.color = mpvReady ? 'var(--accent)' : 'var(--text-muted)';
@@ -2403,6 +2488,7 @@
       if (key === 'prev' && prevBtn) prevBtn.click();
       if (key === 'stop') stopAll();
       if (key === 'fullscreen') toggleFullscreen();
+      if (key === 'opendisc') { if (window.ZApp) window.ZApp.openDisc(); }
       if (key === 'bookmark') { const b = document.getElementById('addBookmarkBtn'); if (b) b.click(); }
     });
   }
@@ -2412,7 +2498,9 @@
     window.electronAPI.onMpvProcessError((info) => {
       const msg = (info && info.error) ? String(info.error).slice(0, 300) : 'mpv failed to play this item';
       showOSD(msg);
-      console.error('mpv-process-error:', info);
+      const pmsg = info && (info.error || info.message) ? String(info.error || info.message).slice(0, 300) : JSON.stringify(info || {}).slice(0, 300);
+      if (window.ZApp && pmsg) window.ZApp.lastMpvError = pmsg;
+      console.error('mpv-process-error: ' + pmsg);
     });
   }
 
@@ -2821,6 +2909,7 @@
         break;
       case 'failed':
         if (window.ZApp) window.ZApp.lastMpvError = String(ev.error || '').trim();
+        if (ev.incompatible) { mpvIncompatible = true; mpvReady = false; mpvBroken = true; mpvFailures = 9; }
         if (!isMpv()) break;
         if (item && item.path && !item._htmlTried && !item.stream) {
           item._htmlTried = true;
@@ -3740,6 +3829,8 @@ if (pasteUrlBtn && urlInput) {
       get mpvMode() { return mpvMode; },
       get mpvReady() { return mpvReady; },
       get mpvBroken() { return mpvBroken; },
+      get mpvIncompatible() { return mpvIncompatible; },
+      setMpvIncompatible(v) { mpvIncompatible = !!v; if (v) { mpvReady = false; mpvBroken = true; } },
       get ab() { return abLoop; },
       get duration() { return curDur(); },
       get volume() { return volumeLevel; },
@@ -3747,6 +3838,7 @@ if (pasteUrlBtn && urlInput) {
       get seekStep() { return seekStep; },
       get seekStepBig() { return seekStepBig; },
       get speed() { return speedRate; },
+      async openDisc() { const a = api(); if (!a || !a.openDiscImage) return; const r = await a.openDiscImage().catch(() => null); if (r && r.ok && r.path) addNativePaths([r.path], { play: true }); },
       toggleMute, takeScreenshot, handleABLoop, cycleRepeat, toggleShuffle, openFilesNative, applyVolumeLimits, pausePlayback, resumePlayback, isPlaying,
       setPref(name, value) {
         switch (name) {
@@ -3781,7 +3873,7 @@ if (pasteUrlBtn && urlInput) {
       addStreamItem(url, title, duration) { const it = makeStreamItem(url, title, duration); playlist.push(it); renderPlaylist(); savePlaylistSoon(); return it; },
       get plFilterActive() { return !!plFilter; },
       setMpvReady(v) {
-        mpvReady = !!v; if (v) { mpvBroken = false; mpvFailures = 0; }
+        mpvReady = !!v && !mpvIncompatible; if (v && !mpvIncompatible) { mpvBroken = false; mpvFailures = 0; }
         if (mpvStatus) { mpvStatus.textContent = mpvReady ? 'mpv ready' : 'mpv missing'; mpvStatus.style.color = mpvReady ? 'var(--accent)' : 'var(--text-muted)'; }
       },
       on(name, fn) { (bus[name] || (bus[name] = [])).push(fn); },

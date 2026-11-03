@@ -150,3 +150,16 @@ async function waitFor(fn, ms = 6000) { const t = Date.now(); while (Date.now() 
   await s4.stop(); await s5.stop();
   console.log('ALL SESSION TESTS PASSED'); process.exit(0);
 })().catch(e => { console.error('FAIL', e); process.exit(1); });
+
+// ---- a Windows "cannot run on this system" exit code is reported at once and never retried (the 0xC0000139 case from the real logs)
+(async () => {
+  const { MpvSession } = require(H.ROOT + '/mpv-session.js'); const assert = require('assert');
+  for (const [code, re] of [[3221225785, /0xC0000139/], [3221225781, /0xC0000135/], [3221225595, /0xC000007B/]]) {
+    const s = new MpvSession({ mpvPath: 'x', platform: 'win32' }); const evs = []; let relaunched = 0; s.on('failed', (e) => evs.push(e)); s.on('recovering', () => evs.push({ recovering: true }));
+    s._launch = async () => { relaunched++; return { ok: true }; }; const child = {}; s.child = child; s.opts = { cfg: {} }; s.startedAt = Date.now(); s.recoveries = 0;
+    s._onExit(child, code, null); await new Promise((r) => setTimeout(r, 500));
+    assert.strictEqual(evs.length, 1); assert(evs[0].incompatible === true && re.test(evs[0].error) && evs[0].code === code, JSON.stringify(evs)); assert.strictEqual(relaunched, 0, 'no retry ladder for a binary that cannot start');
+  }
+  const s2 = new MpvSession({ mpvPath: 'x', platform: 'win32' }); let again = 0; const ev2 = []; s2.on('recovering', () => ev2.push(1)); s2._launch = async () => { again++; return { ok: true }; }; const c2 = {}; s2.child = c2; s2.opts = { cfg: {} }; s2.startedAt = Date.now(); s2.recoveries = 0; s2._onExit(c2, 1, null); await new Promise((r) => setTimeout(r, 600));
+  assert(ev2.length === 1 && again === 1, 'ordinary crashes still use the recovery ladder'); console.log('fatal-binary exit codes OK');
+})().catch((e) => { console.error(e); process.exit(1); });

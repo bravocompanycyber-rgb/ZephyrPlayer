@@ -542,3 +542,11 @@ body.is-fs .zctx{z-index:9600}
 /* v6: accessibility fixes from the contrast audit (muted text and text-on-accent were just under 4.5:1 in the light themes) */
 [data-skin="light"]{--text-muted:#52627a;--accent:#0369a1;--accent-hover:#075985;--accent-soft:rgba(3,105,161,.12)}
 [data-skin="sky"]{--text-muted:#44587a}
+
+/* v6 real-window fixes (found by running the real app): banners must never cover the transport bar, and the engine dropdown must not be cut off */
+.health-banner{bottom:118px}
+.update-banner{bottom:172px}
+.fail-banner{bottom:226px}
+body.is-fs .health-banner,body.is-fs .update-banner,body.is-fs .fail-banner{bottom:96px}
+.settings-panel.settings-center{z-index:400!important}
+#embedSelect{min-width:205px;width:auto}

@@ -1,0 +1,12 @@
+const H = require('./helpers'); const assert = require('assert'); const fs = require('fs'); const os = require('os'); const path = require('path'); const { execFileSync } = require('child_process');
+const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'zstray-')); for (const d of ['editions', 'js', 'tests']) fs.mkdirSync(path.join(proj, d));
+fs.copyFileSync(H.ROOT + '/editions/clean-strays.js', path.join(proj, 'editions', 'clean-strays.js'));
+fs.writeFileSync(path.join(proj, 'js', 'player.js'), 'OLD'); fs.writeFileSync(path.join(proj, 'js', 'features.js'), 'SAME'); fs.writeFileSync(path.join(proj, 'tests', 'dom.test.js'), 'SAMETEST'); fs.writeFileSync(path.join(proj, 'main.js'), 'main'); fs.writeFileSync(path.join(proj, '.gitignore'), '*.exe\n');
+const old = Date.now() / 1000 - 3600; fs.utimesSync(path.join(proj, 'js', 'player.js'), old, old);
+fs.writeFileSync(path.join(proj, 'player.js'), 'NEWER ROOT COPY'); fs.writeFileSync(path.join(proj, 'features.js'), 'SAME'); fs.writeFileSync(path.join(proj, 'dom.test.js'), 'SAMETEST');
+const run = (...a) => execFileSync(process.execPath, [path.join(proj, 'editions', 'clean-strays.js'), ...a], { encoding: 'utf8' });
+let out = run(); assert(/3 stray/.test(out) && /player\.js.*ROOT copy is NEWER/.test(out) && fs.existsSync(path.join(proj, 'player.js')), 'report only, nothing deleted');
+out = run('--fix'); assert(!fs.existsSync(path.join(proj, 'player.js')) && !fs.existsSync(path.join(proj, 'features.js')) && !fs.existsSync(path.join(proj, 'dom.test.js')) && fs.existsSync(path.join(proj, 'main.js')), 'strays removed, real root files kept');
+assert.strictEqual(fs.readFileSync(path.join(proj, 'js', 'player.js'), 'utf8'), 'NEWER ROOT COPY', 'a newer root copy is moved into js/ first (no work lost)');
+assert(/bak-before-fix/.test(fs.readFileSync(path.join(proj, '.gitignore'), 'utf8')), '.gitignore updated'); assert(/clean/.test(run()), 'second run: clean');
+console.log('clean-strays OK');

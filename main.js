@@ -21,7 +21,7 @@ const { spawn, execSync, execFile } = require('child_process');
 // If an installer was built with a file list that forgot some of the app's files, Node would crash with a raw
 // "Cannot find module" stack trace. Check first and explain the real cause and the fix instead.
 {
-  const need = ['mpv-controller', 'tool-updates', 'mpv-ipc', 'mpv-session', 'media-utils', 'media-probe', 'media-tools', 'online-meta', 'engine-config',
+  const need = ['mpv-controller', 'tool-updates', 'media-range', 'mpv-compat', 'disc-utils', 'mpv-ipc', 'mpv-session', 'media-utils', 'media-probe', 'media-tools', 'online-meta', 'engine-config',
     'external-players', 'file-assoc', 'edition'].map((n) => n + '.js')
     .concat(['preload.js', 'index.html', 'css/style.css', 'js/player.js', 'js/features.js', 'js/controls.js', 'js/settings-store.js', 'js/settings-ui.js',
       'js/subtitle-parser.js', 'js/media-name.js', 'js/icons.js', 'js/icons-default.js', 'js/boot-guard.js']);
@@ -53,6 +53,9 @@ const fileAssoc = require('./file-assoc');
 const { detectEdition } = require('./edition');
 const { cleanCfg, parseUserMpvOptions, composeAudioFilter } = require('./engine-config');
 const toolUpdates = require('./tool-updates');
+const mediaRange = require('./media-range');
+const mpvCompat = require('./mpv-compat');
+const discUtils = require('./disc-utils');
 const { nodeFetch } = require('./online-meta');
 const os = require('os');
 
@@ -90,6 +93,9 @@ function log(...args) {
 process.on('uncaughtException', (err) => {
   log('UNCAUGHT EXCEPTION:', err);
 });
+
+// "zmedia://" lets the page read a local media file with CORS + Range, which Web Audio needs for volume above 100% (must be declared before ready).
+try { require('electron').protocol.registerSchemesAsPrivileged([{ scheme: 'zmedia', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]); } catch { /* old/new API differences are not fatal */ }
 
 // Chromium normally runs the audio service as its own process: fold it into the main process (one fewer entry in Task Manager).
 try { app.commandLine.appendSwitch('disable-features', 'AudioServiceOutOfProcess'); } catch { /* older Electron */ }
@@ -360,8 +366,13 @@ function toolDirs(...sub) {
   return Array.from(new Set(out));
 }
 
+// Folder where the app keeps tools it installed or tested on THIS PC (survives installer updates).
+function compatDir() { try { return toolsInstallDir() || path.join(app.getPath('userData'), 'tools'); } catch { return null; } }
+
 function findMpv() {
   return cachedTool('mpv', () => {
+    const own = compatDir();
+    if (own && mpvCompat.readPinned(own) && fileExists(path.join(own, 'mpv.exe'))) return path.join(own, 'mpv.exe');   // the build proven to run here beats a bundled one
     let found = null;
     try { found = mpv.findMpv(); } catch (e) { log('MpvController.findMpv failed:', e.message); }
     if (found && (!isAbsoluteExecutable(found) || fileExists(found))) return found;
@@ -507,7 +518,7 @@ function ensureScreenshotDir() {
 /* Small main-process settings (things needed before the UI exists)           */
 /* -------------------------------------------------------------------------- */
 
-const SETTINGS_DEFAULTS = { splash: true };
+const SETTINGS_DEFAULTS = { splash: true, menuBar: true };
 let settingsCache = null;
 function settingsFile() { return path.join(app.getPath('userData'), 'settings.json'); }
 function getSettings() {
@@ -725,7 +736,8 @@ function getSession() {
     hideEmbed();
     log('mpv failed:', info.error);
     safeSend('mpv-process-error', { error: String(info.error || 'mpv failed').slice(-500) });
-    safeSend('mpv-event', { type: 'failed', error: String(info.error || '').slice(-300) });
+    if (info.incompatible) { compatNeeded = true; log('mpv cannot run on this Windows:', info.error); }
+    safeSend('mpv-event', { type: 'failed', error: String(info.error || '').slice(-300), incompatible: !!info.incompatible, code: info.code });
   });
   return session;
 }
@@ -745,7 +757,12 @@ async function applyAudio() {
 }
 
 async function startPlayback(opts = {}) {
-  const inputs = normalizeInputs(opts.files);
+  let inputs, discArgs = null;
+  if (opts.disc && typeof opts.disc === 'object') {                      // DVD / Blu-ray (folder, drive or image)
+    const dp = discUtils.discPlay(opts.disc.type, opts.disc.path);
+    if (!dp || typeof opts.disc.path !== 'string' || !fileExists(opts.disc.path)) return { ok: false, error: 'Disc not found' };
+    inputs = [dp.input]; discArgs = dp.args;
+  } else inputs = normalizeInputs(opts.files);
   if (!inputs.length) return { ok: false, error: 'No media input' };
 
   const s = getSession();
@@ -755,7 +772,7 @@ async function startPlayback(opts = {}) {
     if (!mediaUtils.isUrl(i) && !fileExists(i)) return { ok: false, error: 'File not found: ' + path.basename(i) };
   }
 
-  let mode = opts.embed === false ? 'off' : (embedMode === 'child' ? 'child' : 'off');
+  let mode = (opts.embed === false || discArgs) ? 'off' : (embedMode === 'child' ? 'child' : 'off');
   let wid = null;
   let syncGeometry = null;
 
@@ -788,6 +805,7 @@ async function startPlayback(opts = {}) {
     cookies: COOKIE_BROWSERS.has(opts.cookies) ? opts.cookies : null,
     cfg: cleanCfg(opts.cfg)
   };
+  if (discArgs) { base.discArgs = discArgs; base.disc = true; base.startPos = 0; }
   base.cfg.compat = Math.max(base.cfg.compat, loadMpvLevel());
   {
     const ex = parseUserMpvOptions(opts.cfg && opts.cfg.extra);
@@ -893,7 +911,7 @@ function createWindow() {
       spellcheck: false,
       backgroundThrottling: false // keep auto-next, sleep timer and progress running while minimized
     },
-    autoHideMenuBar: true
+    autoHideMenuBar: getSettings().menuBar === false
   });
 
   if (st.maximized) mainWindow.maximize();
@@ -1029,6 +1047,7 @@ function createMenu() {
             dialog.showMessageBox(dialogParent() || undefined, { type: r.ok ? 'info' : 'warning', title: 'yt-dlp', message: r.ok ? 'yt-dlp is up to date' : 'Update failed', detail: r.output });
           }
         },
+        { label: 'Open DVD / Blu-ray disc image…', click: () => safeSend('hotkey', 'opendisc') },
         { label: 'Clear watch history…', click: () => safeSend('hotkey', 'clearhistory') },
         {
           label: 'Open icons folder',
@@ -1160,7 +1179,9 @@ function setupAutoUpdate() {
   });
 
   try {
-    autoUpdater.checkForUpdates();
+    // "No published versions on GitHub" just means no release exists yet: not an error, and it must not become an unhandled rejection
+    const p = autoUpdater.checkForUpdates();
+    if (p && typeof p.catch === 'function') p.catch((e) => { if (!/No published versions|404|ENOTFOUND|ENETUNREACH|ETIMEDOUT/i.test(String(e && e.message))) log('checkForUpdates failed:', e && e.message); });
   } catch (e) {
     log('checkForUpdates failed:', e.message);
   }
@@ -1275,7 +1296,7 @@ handle('mpv:playExternal', async (_e, opts) => {
   const o = opts && typeof opts === 'object' && !Array.isArray(opts) ? opts : { files: opts };
   return startPlayback({
     files: o.files, quality: o.quality, embed: o.embed, vo: o.vo, hwdec: o.hwdec,
-    perf: o.perf, startPos: o.startPos, volume: o.volume, mute: o.mute, cookies: o.cookies, cfg: o.cfg
+    perf: o.perf, startPos: o.startPos, volume: o.volume, mute: o.mute, cookies: o.cookies, cfg: o.cfg, disc: o.disc
   });
 });
 
@@ -1304,6 +1325,7 @@ handle('mpv:stop', async () => {
 handle('mpv:setQuality', async (_e, quality) => {
   const s = session;
   if (!s || !s.alive || !s.inputs.length) return { ok: false, error: 'Nothing playing' };
+  if (s.opts && s.opts.disc) return { ok: true };                       // the quality presets do not apply to discs
   return startPlayback({
     files: s.inputs, quality: quality || (s.opts && s.opts.quality) || 'high',
     vo: s.opts && s.opts.vo, hwdec: s.opts && s.opts.hwdec, perf: s.opts && s.opts.perf,
@@ -1610,6 +1632,11 @@ handle('media:fixAudio', async (_e, file) => {
   } finally { fixingAudio = false; }
 });
 
+handle('dialog:openDiscImage', async () => {
+  const res = await showOpen({ title: 'Open a DVD / Blu-ray disc image', properties: ['openFile'], filters: [{ name: 'Disc images', extensions: ['iso', 'img'] }, { name: 'All files', extensions: ['*'] }] });
+  return res.canceled || !res.filePaths || !res.filePaths[0] ? { ok: false, cancelled: true } : { ok: true, path: res.filePaths[0] };
+});
+
 handle('files:trash', async (_e, paths) => {
   const results = [];
   for (const p of (Array.isArray(paths) ? paths : []).slice(0, 500)) {
@@ -1670,7 +1697,44 @@ handle('tools:status', async () => {
 });
 
 let installProc = null;
+/* ---- mpv that cannot start on this Windows (exit code 0xC0000139 etc.): find one that can, by testing real builds here ---- */
+let compatNeeded = false;
+let compatRun = null;
+async function runCompatSearch() {
+  if (compatRun) return { ok: false, error: 'A search is already running' };
+  const dir = compatDir();
+  if (!dir) return { ok: false, error: 'No folder available for tools' };
+  compatRun = new AbortController();
+  try { if (session) await session.stop(); } catch { /* not running */ }
+  let r;
+  try {
+    r = await mpvCompat.installCompatible({ toolsDir: dir, arch: process.arch === 'ia32' ? 'ia32' : 'x64', fetchImpl: nodeFetch, signal: compatRun.signal,
+      onProgress: (m) => { log('[mpv compat]', m); safeSend('tools-progress', { line: m }); } });
+  } catch (e) { r = { ok: false, error: e && e.message ? e.message : String(e) }; }
+  compatRun = null;
+  toolCache.delete('mpv');
+  if (r.ok) compatNeeded = false;
+  safeSend('mpv-compat', { ok: r.ok, tag: r.tag, error: r.error, fixed: true });
+  return r;
+}
+handle('mpv:findCompatible', async () => runCompatSearch());
+handle('mpv:cancelCompat', async () => { if (compatRun) compatRun.abort(); return { ok: true }; });
+async function checkMpvRuns() {
+  const p = findMpv();
+  if (!p || !isAbsoluteExecutable(p) || !fileExists(p)) return { present: false, ok: true };
+  const r = await mpvCompat.runsHere(p);
+  if (!r.ok && /^(3221225785|3221225781|3221225595)$/.test(String(r.code >>> 0))) compatNeeded = true;
+  return { present: true, ok: r.ok, code: r.code >>> 0, path: p };
+}
+handle('mpv:checkRuns', async () => checkMpvRuns());
+
 handle('tools:install', async (_e, opts) => {
+  // mpv on an old Windows (or one already proven not to start): test real builds on THIS PC instead of installing "the latest"
+  if (opts && Array.isArray(opts.only) && opts.only.includes('mpv') && (compatNeeded || getEdition().oldOS || (compatDir() && mpvCompat.readPinned(compatDir())))) {
+    const cr = await runCompatSearch();
+    opts = Object.assign({}, opts, { only: opts.only.filter((x) => x !== 'mpv') });
+    if (!opts.only.length) return cr;
+  }
   if (process.platform !== 'win32') return { ok: false, error: 'The installer script is for Windows. See TOOLS.md.' };
   if (installProc) return { ok: false, error: 'An install is already running' };
   const script = findSetupScript();
@@ -1708,6 +1772,8 @@ handle('tools:checkUpdates', async () => {
   const ed = getEdition();
   const ids = ['ytdlp', 'mpv', 'ffmpeg', 'whisper', ed.preferQuickJs ? 'quickjs' : 'deno'];
   const list = await toolUpdates.checkUpdates({ installed, recorded: recordedVersions(), fetchImpl: f || nodeFetch, ids });
+  const pin = compatDir() && mpvCompat.readPinned(compatDir());
+  if (pin) list.forEach((x) => { if (x.id === 'mpv') { x.status = 'current'; x.installed = pin.tag + ' (newest that runs on this PC)'; } });
   return { ok: true, list, updates: list.filter((x) => x.status === 'update').map((x) => x.id) };
 });
 
@@ -1732,7 +1798,14 @@ handle('diag:collect', async () => {
 });
 
 handle('app:getSetting', async (_e, key) => ({ ok: true, value: getSettings()[key] }));
-handle('app:setSetting', async (_e, key, value) => ({ ok: setSetting(String(key), value) }));
+handle('app:setSetting', async (_e, key, value) => {
+  const ok = setSetting(String(key), value);
+  if (ok && key === 'menuBar' && mainWindow && !mainWindow.isDestroyed()) {       // File / Help menu: always visible, or only while Alt is pressed
+    mainWindow.setAutoHideMenuBar(value === false);
+    mainWindow.setMenuBarVisibility(value !== false);
+  }
+  return { ok };
+});
 
 handle('docs:open', async (_e, which) => {
   const names = { guide: 'README.md', tools: 'TOOLS.md', changes: 'CHANGES.md' };
@@ -2301,8 +2374,13 @@ handle('app:getInfo', async () => ({
 
 app.whenReady().then(() => {
   log('ZephyrPlayer starting... isPackaged:', app.isPackaged);
+  try {                                                  // only real media files can be read through zmedia://
+    const mode = mediaRange.registerMediaProtocol(require('electron').protocol, (f) => mediaUtils.isMedia(f) && !/\.(exe|dll|bat|cmd|ps1|js|html?)$/i.test(f), log);
+    log('zmedia protocol registered via', mode);
+  } catch (e) { log('zmedia protocol failed:', e.message); }
   pruneOldLogs();
   pruneConverted();
+  setTimeout(() => { checkMpvRuns().then((r) => { if (r.present && !r.ok) { log('mpv does not start here, exit code', r.code); safeSend('mpv-compat', { ok: false, code: r.code, startup: true }); } }).catch(() => {}); }, 5000);
   showSplash();
 
   loadRecentFiles();

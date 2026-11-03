@@ -172,7 +172,7 @@
         title: (item.meta && item.meta.episode && item.meta.episode.title) || (item.meta && item.meta.title) || item.name || 'ZephyrPlayer',
         artist: (item.info && item.info.artist) || (item.meta && (item.meta.artist || item.meta.title)) || '',
         album: (item.info && item.info.album) || (item.meta && item.meta.album) || '',
-        artwork: art ? [{ src: art, sizes: '512x512' }] : []
+        artwork: art && /^(https?:|data:|blob:)/i.test(art) ? [{ src: art, sizes: '512x512' }] : []      // file:// artwork is rejected by the browser (it logged a warning every time)
       });
       if (!msBound) {
         msBound = true;
@@ -257,7 +257,7 @@
       case 'theme': setTheme(v); break;
       case 'accentMode': case 'accentColor': applyAccent(); break;
       case 'fsLine': body.classList.toggle('fs-line-off', !v); break;
-      case 'splash': if (api() && api().setSetting) api().setSetting('splash', !!v); break;
+      case 'splash': case 'menuBar': if (api() && api().setSetting) api().setSetting(id, !!v); break;
       case 'online': { const w = $('welcomeOnline'); if (w) w.checked = !!v; if (v && A.item) lookup(A.item, false); break; }
       case 'artMode': A.renderPlaylist(); break;
       case 'seekStep': case 'seekStepBig': case 'autoNext': case 'rememberPos': case 'skipBad': case 'volumeMax': case 'volumeStep': A.setPref(id, v); break;
@@ -276,7 +276,7 @@
   { const q = $('qualitySelect'); if (q) q.value = S.get('quality'); }
   pushAudioPrefs();
   if (S.get('deinterlace') || S.get('smoothMotion')) pushVideoPrefs();
-  if (api() && api().setSetting) api().getSetting('splash').then((r) => { if (r && r.ok && typeof r.value === 'boolean' && r.value !== S.get('splash')) S.set('splash', r.value, { quiet: true }); }).catch(() => {});
+  if (api() && api().getSetting) ['splash', 'menuBar'].forEach((k) => api().getSetting(k).then((r) => { if (r && r.ok && typeof r.value === 'boolean' && r.value !== S.get(k)) S.set(k, r.value, { quiet: true }); }).catch(() => {}));
   on($('fetchAllInfoBtn'), 'click', fetchAll);
   A.fetchAllInfo = fetchAll;
   A.clearOnlineCache = async () => {
@@ -538,6 +538,7 @@
   const CODEC_LABEL = { ac3: 'Dolby Digital (AC-3)', eac3: 'Dolby Digital Plus', dts: 'DTS', truehd: 'Dolby TrueHD', hevc: 'HEVC / H.265', mpeg2video: 'MPEG-2', vc1: 'VC-1', wmv3: 'WMV', wmav2: 'WMA' };
   const codecLabel = (c) => CODEC_LABEL[c] || String(c || 'unknown').toUpperCase();
   function mpvNote() {
+    if (A.mpvIncompatible) return 'mpv cannot run on this version of Windows (it needs a newer system function). It can be replaced by a build tested on this PC.';
     if (A.mpvBroken || (A.mpvReady && A.lastMpvError)) return 'mpv is installed but could not play it on this PC' + (A.lastMpvError ? ' (it said: ' + A.lastMpvError.split(/\r?\n/).filter(Boolean).slice(-1)[0].slice(0, 110) + ')' : '') + '.';
     return A.mpvReady ? '' : 'mpv, which plays it, is not available here.';
   }
@@ -565,11 +566,41 @@
     const r = await api().fixAudio(item.path).catch(() => null);
     if (typeof off === 'function') off();
     if (r && r.ok) {
-      item.altUrl = fileUrl(r.path);
+      item.altUrl = fileUrl(r.path); item.altPath = r.path;
       A.showOSD(r.cached ? 'Sound fixed (used the saved copy)' : 'Sound fixed', 2200);
       A.playIndex(A.playlist.indexOf(item), { startPos: t, noHistory: true });
     } else A.showOSD('Could not fix the sound: ' + ((r && r.error) || 'unknown error'), 6000);
   }
+  // mpv cannot start on this Windows: test real builds HERE (newest first, binary search) and install the newest one that runs
+  let compatSearching = false;
+  async function findCompatibleMpv(item) {
+    if (compatSearching || !api() || !api().mpvFindCompatible) return;
+    compatSearching = true;
+    const off = api().onToolsProgress ? api().onToolsProgress((p) => { if (p && p.line) A.showOSD('mpv: ' + String(p.line).slice(0, 80), 3000); }) : null;
+    A.showOSD('Looking for an mpv that runs on this PC (it downloads and tests a few builds, one time)…', 9000);
+    const r = await api().mpvFindCompatible().catch(() => null);
+    if (typeof off === 'function') off();
+    compatSearching = false;
+    if (r && r.ok) {
+      A.setMpvIncompatible(false);
+      const st = await (api().mpvAvailable ? api().mpvAvailable() : Promise.resolve(null)).catch(() => null);
+      A.setMpvReady(!!(st && st.available));
+      A.showOSD('mpv ' + r.tag + ' installed: it runs on this PC', 5000);
+      if (item) { item._htmlTried = false; item._triedMpv = false; item._offered = false; item.forceMpv = true; A.playIndex(A.playlist.indexOf(item), { startPos: A.time, noHistory: true }); }
+    } else {
+      offer('No mpv build could run on this PC' + (r && r.error ? ': ' + r.error : '.') + ' Your other players can play the file.', []);
+      const pl = (await (api() && api().externalList ? api().externalList() : Promise.resolve(null)).catch(() => null) || {}).players || [];
+      if (item && item.path && pl.length) offer('No mpv build could run on this PC. Open this file in another player:', pl.slice(0, 3).map((p) => ({ label: 'Open in ' + p.name, run: () => api().externalOpen({ id: p.id, file: item.path }) })));
+    }
+  }
+  A.findCompatibleMpv = findCompatibleMpv;
+  if (api() && api().onMpvCompat) api().onMpvCompat((p) => {
+    if (p && p.ok === false && !p.fixed) {          // reported at start-up, before anything is played
+      A.setMpvIncompatible(true);
+      offer('mpv cannot run on this Windows (error 0x' + (Number(p.code) >>> 0).toString(16).toUpperCase() + '). That is why mkv / HEVC files do not play here. ZephyrPlayer can test mpv builds on this PC and install one that works.', [
+        { label: 'Find an mpv that works on this PC', primary: true, run: () => findCompatibleMpv(A.item) }, { label: 'Later', run: () => {} }]);
+    }
+  });
   A.fixSound = fixSound; A.downloadMpv = downloadMpv;
 
   A.on('nocodec', async (item, kind) => {
@@ -579,12 +610,14 @@
     const audioOnlyProblem = info.hasVideo === false ? false : (BROWSER_VIDEO.includes(info.vcodec) && !(info.bitDepth > 8));
     const buttons = [];
     if (item.path && audioOnlyProblem) buttons.push({ label: 'Fix sound (keeps the video)', primary: true, run: () => fixSound(item) });
+    if (A.mpvIncompatible) buttons.push({ label: 'Find an mpv that works on this PC', primary: true, run: () => findCompatibleMpv(item) });
     if (!A.mpvReady && !A.mpvBroken) buttons.push({ label: 'Download mpv (free)', primary: !buttons.length, run: () => downloadMpv(item) });
     let players = [];
     if (api() && api().externalList) players = ((await api().externalList().catch(() => null)) || {}).players || [];
     players.slice(0, 3).forEach((pl) => buttons.push({ label: 'Open in ' + pl.name + (pl.klite ? ' (K-Lite)' : ''), run: () => api().externalOpen({ id: pl.id, file: item.path }).then((o) => A.showOSD(o && o.ok ? 'Opened in ' + pl.name : 'Could not open ' + pl.name, 2500)) }));
-    if (!buttons.length) return;
-    const text = audioOnlyProblem
+    buttons.push({ label: 'Tools & health', run: () => openTools() });                              // always at least one way forward
+    if (api() && api().collectDiagnostics) buttons.push({ label: 'Copy diagnostics', run: () => api().collectDiagnostics().then((d) => { try { navigator.clipboard.writeText(typeof d === 'string' ? d : JSON.stringify(d, null, 2)); A.showOSD('Diagnostics copied: paste them to the developer', 3500); } catch { A.showOSD('Could not copy', 2000); } }) });
+    const text = item.disc ? 'Playing a ' + (item.disc.type === 'bd' ? 'Blu-ray' : 'DVD') + ' disc needs mpv. ' + mpvNote() : audioOnlyProblem
       ? 'No sound: the built-in player cannot play this file\'s audio (' + codecLabel(info.acodec) + ', common on Blu-ray rips). ' + mpvNote()
       : 'The built-in player cannot decode this file (' + codecLabel(info.vcodec !== undefined && !BROWSER_VIDEO.includes(info.vcodec) ? info.vcodec : info.acodec) + '). ' + mpvNote();
     offer(text, buttons);
@@ -908,7 +941,15 @@
       { label: 'Subtitles on / off', icon: 'subtitles', hint: 'V', run: act('subToggle') },
       { label: 'Next audio track', icon: 'audio-track', hint: 'Shift+A', disabled: !A.isMpv(), run: act('audioTrack') },
       { sep: true },
-      { label: 'Details & poster…', icon: 'info', disabled: !it, run: () => openDetails() },
+      ...(it && it.disc ? [
+        { sep: true }, { header: it.disc.type === 'bd' ? 'Blu-ray' : 'DVD menu' },
+        { label: it.disc.type === 'bd' ? 'Disc menu (if the disc has one)' : 'Disc menu', icon: 'playlist', run: () => A.mpvCmd('discnav', 'menu') },
+        { label: 'Select', icon: 'play', hint: 'Enter', run: () => A.mpvCmd('discnav', 'select') },
+        { label: 'Up', run: () => A.mpvCmd('discnav', 'up') }, { label: 'Down', icon: 'chevron-down', run: () => A.mpvCmd('discnav', 'down') },
+        { label: 'Left', icon: 'prev', run: () => A.mpvCmd('discnav', 'left') }, { label: 'Right', icon: 'next', run: () => A.mpvCmd('discnav', 'right') },
+        { label: 'Next title', icon: 'next', run: () => { A.mpvCmd('add', 'disc-title', 1); A.showOSD('Next title'); } },
+        { label: 'Previous title', icon: 'prev', run: () => { A.mpvCmd('add', 'disc-title', -1); A.showOSD('Previous title'); } }, { sep: true }] : []),
+      { label: 'Details & poster…', icon: 'info', disabled: !it || !!(it && it.disc), run: () => openDetails() },
       { label: 'Open file location', icon: 'folder-open', disabled: !(it && it.path), run: () => api() && api().showItem && api().showItem(it.path) },
       { label: 'Settings…', icon: 'settings', hint: 'Ctrl+,', run: () => A.openSettings && A.openSettings() }
     ]);

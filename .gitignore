@@ -38,3 +38,9 @@ Thumbs.db
 
 # ZephyrPlayer external tools (run setup-tools.ps1 to fetch them)
 *.com
+# generated / local-only
+package.json.bak-before-fix
+package.json.edition-backup
+tools-versions.json
+mpv-version.txt
+build/tools-*/

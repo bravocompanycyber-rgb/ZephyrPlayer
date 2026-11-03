@@ -56,6 +56,7 @@
     { id: 'shortcuts', group: 'App', label: 'Keyboard shortcut list', keys: ['shift+/'], run: () => A.openShortcuts && A.openShortcuts() },
     { id: 'settings', group: 'App', label: 'Settings', keys: ['ctrl+,'], run: () => A.openSettings && A.openSettings() },
     { id: 'openFiles', group: 'App', label: 'Open files', keys: ['ctrl+o'], run: () => A.openFilesNative() },
+    { id: 'openDisc', group: 'App', label: 'Open a DVD / Blu-ray disc image', keys: ['ctrl+shift+d'], run: () => A.openDisc && A.openDisc() },
     { id: 'openUrl', group: 'App', label: 'Open a link', keys: ['ctrl+u'], run: () => click('addUrlBtn') },
     { id: 'jump', group: 'Playback', label: 'Jump to a time…', keys: ['ctrl+g'], run: () => A.openJump && A.openJump() },
     { id: 'pasteLink', group: 'App', label: 'Open the link in the clipboard', keys: ['ctrl+v'], run: () => A.pasteLink && A.pasteLink() },

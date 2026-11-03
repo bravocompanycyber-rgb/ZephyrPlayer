@@ -26,7 +26,7 @@ const SETTABLE = new RegExp('^(' + [
   'video-zoom', 'video-pan-[xy]', 'tone-mapping', 'hdr-compute-peak', 'target-trc', 'target-prim',
   'ab-loop-[ab]', 'loop-file', 'loop-playlist', 'ontop', 'fullscreen', 'lavfi-complex', 'deinterlace',
   'interpolation', 'video-sync', 'hwdec', 'time-pos', 'percent-pos', 'chapter', 'audio-pitch-correction',
-  'osd-level', 'osc'
+  'osd-level', 'osc', 'disc-title'
 ].join('|') + ')$');
 
 // Properties worth re-applying after a crash/relaunch or quality change.
@@ -35,7 +35,7 @@ const NOT_PERSISTED = /^(pause|time-pos|percent-pos|chapter|aid|sid|vid|ab-loop-
 const COMMANDS = new Set([
   'seek', 'cycle', 'add', 'set', 'frame-step', 'frame-back-step', 'screenshot', 'screenshot-to-file',
   'sub-add', 'sub-remove', 'sub-reload', 'audio-add', 'script-binding', 'script-message', 'show-text',
-  'cycle-values', 'multiply', 'revert-seek', 'apply-profile', 'osd-auto', 'keybind', 'ab-loop'
+  'cycle-values', 'multiply', 'revert-seek', 'apply-profile', 'osd-auto', 'keybind', 'ab-loop', 'discnav'
 ]);
 
 function isSafeToken(v) { return typeof v === 'string' && /^[A-Za-z0-9_.,:+-]{1,80}$/.test(v); }
@@ -80,6 +80,12 @@ function qualityArgs(quality, shaderDir, log, light) {
   return a;
 }
 
+// Windows exit codes that mean "this executable cannot start on this system" (not a graphics or file problem)
+const FATAL_BINARY = {
+  3221225785: 'a Windows function it needs does not exist on this version of Windows (error 0xC0000139)',
+  3221225781: 'a Windows DLL it needs is missing (error 0xC0000135)',
+  3221225595: 'it is not a valid program for this Windows (error 0xC000007B)'
+};
 const clampN = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, Math.round(n))) : d; };
 const LANG_RE = /^[A-Za-z0-9,_-]{0,40}$/;
 
@@ -173,6 +179,7 @@ function buildArgs(o) {
     a.push('--autofit=75%x75%', '--autofit-larger=92%x92%', '--geometry=50%:50%');
   }
 
+  if (Array.isArray(o.discArgs)) a.push(...o.discArgs);                    // which disc / image (DVD or Blu-ray)
   if (level < 2 && Array.isArray(o.userExtra)) a.push(...o.userExtra);     // a typo in the user's options falls back to safe mode instead of failing
   if (Array.isArray(o.extra)) a.push(...o.extra);
   return a;
@@ -358,7 +365,8 @@ class MpvSession extends EventEmitter {
         const dbl = binds.find((b) => b[0] === 'MBTN_LEFT_DBL'); if (dbl) dbl[1] = 'script-message zephyr-fs';
         ipc.command('script-message', 'osc-visibility', 'never', 'no-osd').catch(() => {});
       }
-      for (const [k, cmd] of binds) ipc.command('keybind', k, cmd).catch(() => {});
+      // discs: mpv's own mouse and key handling drives the DVD menu, so our click / wheel overrides stay off
+      if (!this.opts.disc) for (const [k, cmd] of binds) ipc.command('keybind', k, cmd).catch(() => {});
     }
     this._loading = true;
     this._startOpenWatch();
@@ -396,6 +404,13 @@ class MpvSession extends EventEmitter {
 
     const tail = this.tail.slice(-500);
     this.log('mpv exited abnormally', code, signal, tail);
+    // Windows says the program itself cannot run here (missing system function / DLL / wrong format). Retrying with other settings can never help.
+    const fatal = FATAL_BINARY[(code >>> 0)];
+    if (fatal) {
+      this.recoveries = 99;
+      this.emit('failed', { error: 'mpv.exe cannot run on this Windows: ' + fatal, incompatible: true, code: code >>> 0 });
+      return;
+    }
     if (this.recoveries >= 4) { this.emit('failed', { error: tail || ('mpv exited with code ' + code) }); return; }
     this.recoveries++;
     const badOption = /option not found|Error parsing option|Unknown option|Setting commandline option/i.test(tail);

@@ -2,6 +2,7 @@
 /** Filesystem / playlist helpers for the main process. Pure Node, no Electron imports. */
 const fs = require('fs');
 const path = require('path');
+const discUtils = require('./disc-utils');
 const { fileURLToPath } = require('url');
 
 const MEDIA_EXT = new Set((
@@ -25,6 +26,7 @@ async function expandPaths(inputs, { maxFiles = 5000, maxDepth = 8 } = {}) {
   const media = [];
   const subs = [];
   const streams = [];
+  const discs = [];
   const seen = new Set();
 
   async function walk(dir, depth) {
@@ -35,14 +37,28 @@ async function expandPaths(inputs, { maxFiles = 5000, maxDepth = 8 } = {}) {
     for (const ent of entries) {
       if (media.length >= maxFiles) return;
       const full = path.join(dir, ent.name);
-      if (ent.isDirectory()) await walk(full, depth + 1);
+      if (ent.isDirectory()) { if (!(await addDiscFolder(full))) await walk(full, depth + 1); }
       else if (ent.isFile() || ent.isSymbolicLink()) await addFile(full, false);
     }
+  }
+
+  // a folder that is a DVD / Blu-ray becomes ONE disc item (not hundreds of .vob / .m2ts pieces)
+  async function addDiscFolder(dir) {
+    const d = await discUtils.detectDiscFolder(dir);
+    if (!d) return false;
+    const key = d.root.toLowerCase();
+    if (!seen.has(key)) { seen.add(key); discs.push({ type: d.type, path: d.root, name: path.basename(d.root) || d.root }); }
+    return true;
   }
 
   async function addFile(full, explicit) {
     const key = full.toLowerCase();
     if (seen.has(key)) return;
+    if (discUtils.isDiscImageExt(full)) {
+      const type = await discUtils.detectDiscImage(full);
+      if (type) { seen.add(key); discs.push({ type, path: full, name: path.basename(full), image: true }); }
+      return;
+    }
     if (isSub(full)) { seen.add(key); subs.push(full); return; }
     if (isPlaylist(full)) { seen.add(key); await addPlaylist(full); return; }
     if (!explicit && !isMedia(full)) return;
@@ -67,10 +83,10 @@ async function expandPaths(inputs, { maxFiles = 5000, maxDepth = 8 } = {}) {
     if (isUrl(raw)) { streams.push({ url: raw, title: raw }); continue; }
     let st;
     try { st = await fs.promises.stat(raw); } catch { continue; }
-    if (st.isDirectory()) await walk(raw, 0);
+    if (st.isDirectory()) { if (!(await addDiscFolder(raw))) await walk(raw, 0); }
     else if (st.isFile()) await addFile(raw, true);
   }
-  return { media, subs, streams };
+  return { media, subs, streams, discs };
 }
 
 /** Subtitle files next to a media file: "movie.srt", "movie.en.srt", "movie.English.ass" ... */

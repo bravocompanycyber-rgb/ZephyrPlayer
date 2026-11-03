@@ -1,5 +1,11 @@
 # ZephyrPlayer upgrade v6
 
+## Newest: found from the real logs
+- **Root cause of "mpv hiccups, mkv never plays" on the Windows 8.1 PC:** the logs show EVERY mpv start exits with 0xC0000139 (entry point not found): the bundled mpv.exe is a Windows-10 build. The app now detects this instantly, stops retrying, says so, and **finds an mpv that runs on that PC** (tests real builds, binary search, pinned). The legacy installer no longer packs mpv.
+- **Discs:** DVD (with menus) and Blu-ray (main movie + titles) from folders, drives and .iso/.img images. Blu-ray Java menus and AACS copy protection are not supported.
+- **Extra volume inside the built-in player** (no new window), with automatic fallback to mpv.
+- Menu bar visible by default (no Alt). Harmless "No published versions" updater error and the media-session artwork warning silenced. `editions/clean-strays.js` repairs stray root copies of js/tests files.
+
 ## Latest: Blu-ray audio, no-mpv offers, distribution build, self-diagnosing interface
 - **Blu-ray style files (AC-3 / DTS / TrueHD audio)** no longer end in silence when mpv is missing or will not start: a banner offers **Fix sound** (video copied untouched, only audio converted to AAC with FFmpeg, cached), **Download mpv**, or **Open in VLC / PotPlayer / MPC-HC**. **Extra volume without mpv** now offers the mpv download instead of a vague message. If mpv fails to start twice, the app stops trying it and says so.
 - `editions/build-release.bat` builds installers FOR OTHER PCs: per-edition tools packed inside (legacy = QuickJS, not Deno), file list checked, `--publish never`, prints exactly which file to copy.

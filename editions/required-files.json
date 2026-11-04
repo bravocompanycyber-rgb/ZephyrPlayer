@@ -1,6 +1,8 @@
 {
   "files": [
+    "assets/icons/favicon.svg",
     "assets/icons/play.svg",
+    "assets/icons/zephyrplayer.ico",
     "css/style.css",
     "disc-utils.js",
     "edition.js",
@@ -31,5 +33,9 @@
     "preload.js",
     "splash.html",
     "tool-updates.js"
+  ],
+  "external": [
+    "setup-tools.ps1",
+    "README.md"
   ]
 }

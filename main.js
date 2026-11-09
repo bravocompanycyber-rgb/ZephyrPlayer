@@ -94,6 +94,12 @@ process.on('uncaughtException', (err) => {
   log('UNCAUGHT EXCEPTION:', err);
 });
 
+// Graphics acceleration for the interface can be turned off in Settings > Advanced (old Intel drivers sometimes draw stray lines). Read before the app is ready.
+try {
+  const gp = path.join(app.getPath('userData'), 'settings.json');
+  if (fs.existsSync(gp) && JSON.parse(fs.readFileSync(gp, 'utf8')).uiGpu === false) app.disableHardwareAcceleration();
+} catch { /* defaults */ }
+
 // "zmedia://" lets the page read a local media file with CORS + Range, which Web Audio needs for volume above 100% (must be declared before ready).
 try { require('electron').protocol.registerSchemesAsPrivileged([{ scheme: 'zmedia', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]); } catch { /* old/new API differences are not fatal */ }
 
@@ -518,7 +524,7 @@ function ensureScreenshotDir() {
 /* Small main-process settings (things needed before the UI exists)           */
 /* -------------------------------------------------------------------------- */
 
-const SETTINGS_DEFAULTS = { splash: true, menuBar: true };
+const SETTINGS_DEFAULTS = { splash: true, menuBar: true, uiGpu: true };
 let settingsCache = null;
 function settingsFile() { return path.join(app.getPath('userData'), 'settings.json'); }
 function getSettings() {
@@ -694,6 +700,12 @@ function mpvLevelFile() { return path.join(app.getPath('userData'), 'mpv-level.j
 function loadMpvLevel() { try { const v = Number(JSON.parse(fs.readFileSync(mpvLevelFile(), 'utf8')).level); return Number.isFinite(v) ? Math.max(0, Math.min(3, v)) : 0; } catch { return 0; } }
 function saveMpvLevel(level) { try { fs.writeFileSync(mpvLevelFile(), JSON.stringify({ level, at: Date.now() })); } catch { /* not important */ } }
 
+// A weak PC (few slow cores or little memory, like an Atom/Celeron laptop) gets the light playback profile by default.
+function isWeakPc() {
+  try { const c = os.cpus(); const mhz = (c[0] && c[0].speed) || 0; const gb = os.totalmem() / 1073741824; return gb <= 3.5 || (c.length <= 4 && (mhz <= 2400 || gb <= 4.5)); } catch { return false; }
+}
+function resolvePerf(p) { return p === 'low' || p === 'quality' || p === 'smooth' ? p : (isWeakPc() ? 'low' : 'smooth'); }
+
 function getSession() {
   const mpvPath = findMpv();
   if (!mpvPath) return null;
@@ -796,7 +808,7 @@ async function startPlayback(opts = {}) {
 
   const base = {
     quality: opts.quality || 'high',
-    vo: opts.vo, hwdec: opts.hwdec, perf: opts.perf,
+    vo: opts.vo, hwdec: opts.hwdec, perf: resolvePerf(opts.perf),
     volume: opts.volume, mute: !!opts.mute,
     startPos: Number(opts.startPos) || 0,
     ytdlpPath: findYtDlp(), shaderDir: path.join(getAppPath(), 'shaders'),
@@ -1153,6 +1165,8 @@ function setupAutoUpdate() {
   });
 
   autoUpdater.on('error', (err) => {
+    const msg = String(err && err.message || err);
+    if (/No published versions|404|ENOTFOUND|ENETUNREACH|ETIMEDOUT|ECONNRESET|rate limit|403|net::ERR/i.test(msg)) { log('Auto-updater: nothing to update (' + msg.split('\n')[0].slice(0, 80) + ')'); return; }
     log('Auto-updater error:', err);
     safeSend('update-status', { status: 'error', error: err && err.message });
   });
@@ -2372,6 +2386,7 @@ handle('app:getInfo', async () => ({
 /* App lifecycle                                                              */
 /* -------------------------------------------------------------------------- */
 
+  log('weak PC profile:', isWeakPc());
 app.whenReady().then(() => {
   log('ZephyrPlayer starting... isPackaged:', app.isPackaged);
   try {                                                  // only real media files can be read through zmedia://

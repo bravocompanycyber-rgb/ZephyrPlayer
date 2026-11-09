@@ -163,7 +163,7 @@ function buildArgs(o) {
     a.push('--script-opts=' + so.join(','));
   }
 
-  if (o.perf === 'low') a.push('--profile=fast', '--scale=bilinear', '--vd-lavc-threads=2', '--hwdec=no');
+  if (o.perf === 'low') a.push('--profile=fast', '--scale=bilinear', '--cscale=bilinear', '--dscale=bilinear', '--vd-lavc-threads=0', '--vd-lavc-skiploopfilter=nonref', '--framedrop=vo');   // all cores for software HEVC; the GPU decoder (if any) stays on
 
   // window placement
   const mode = o.mode || 'off';

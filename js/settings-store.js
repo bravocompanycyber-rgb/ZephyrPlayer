@@ -87,8 +87,8 @@
     /* ---------------- video */
     { id: 'quality', group: 'video', level: 'basic', type: 'select', def: 'high', options: opt([['fast', 'Fast (480p, weak PC)'], ['high', 'High (balanced, recommended)'], ['sharpen', 'Sharpen'], ['anime', 'Anime'], ['anime4k', 'Anime4K'], ['hdr', 'HDR']]),
       label: 'Video quality preset', tip: 'Picture-processing profile used by mpv. "High" runs on almost any PC; Sharpen/Anime/Anime4K need a good GPU. For online videos it also limits the resolution.' },
-    { id: 'perf', group: 'video', level: 'basic', type: 'select', def: 'smooth', legacy: 'zephyr-settingPerf', options: opt([['smooth', 'Balanced'], ['low', 'Low CPU / GPU use'], ['quality', 'Best quality']]),
-      label: 'Performance', tip: '"Low" uses simpler processing for old or battery-powered PCs. The player also lowers quality by itself if frames start dropping.' },
+    { id: 'perf', group: 'video', level: 'basic', type: 'select', def: 'auto', legacy: 'zephyr-settingPerf', options: opt([['auto', 'Automatic (recommended)'], ['smooth', 'Balanced'], ['low', 'Low CPU / GPU use'], ['quality', 'Best quality']]),
+      label: 'Performance', tip: '"Automatic" picks the light profile on weak PCs (few slow cores or little memory) and the balanced one elsewhere. "Low" uses simpler processing for old or battery-powered PCs. The player also lowers quality by itself if frames start dropping.' },
     { id: 'fsLine', group: 'video', level: 'basic', type: 'toggle', def: true, legacy: 'zephyr-fsline', legacyBool: true,
       label: 'Thin progress line in fullscreen', tip: 'Keeps a slim progress bar at the bottom edge while the controls are hidden in fullscreen.' },
     { id: 'fsReveal', group: 'video', level: 'basic', type: 'select', def: 'move', options: opt([['move', 'When the mouse moves (and at the edges)'], ['edges', 'Only at the screen edges']]),
@@ -101,6 +101,8 @@
       label: 'Video output', tip: 'The mpv renderer. "gpu-next" has better HDR and scaling but can be less stable on old drivers.' },
     { id: 'hwdec', group: 'video', level: 'advanced', type: 'select', def: 'auto', legacy: 'zephyr-settingHwdec', options: opt([['auto', 'Automatic (recommended)'], ['d3d11va', 'D3D11VA'], ['dxva2', 'DXVA2 (older PCs)'], ['nvdec', 'NVIDIA NVDEC'], ['no', 'Off (software only)']]),
       label: 'Hardware decoding', tip: 'Uses your graphics card to decode video: much less CPU and heat, especially for 4K and HEVC. Turn off only if you see green or garbled video.' },
+    { id: 'uiGpu', group: 'video', level: 'advanced', type: 'toggle', def: true, main: true,
+      label: 'Graphics acceleration for the interface (restart needed)', tip: 'Turn this off if you see stray lines or flickering in the window on an older PC. Video playback is not affected. Takes effect the next time you start the app.' },
     { id: 'compat', group: 'video', level: 'advanced', type: 'select', def: 0, number: true, options: opt([[0, 'Normal'], [1, 'Compatible'], [2, 'Safest (software decode)']]),
       label: 'Rendering safety level', tip: 'Start mpv with safer settings from the beginning. Use "Compatible" or "Safest" if videos are blank or crash on your PC. The app also falls back by itself.' },
 

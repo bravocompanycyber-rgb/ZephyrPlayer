@@ -2,7 +2,7 @@
 'use strict';
 /**
  * Removes stray copies of files that were saved into the project ROOT by mistake
- * (for example features.js, player.js, settings-ui.js, *.test.js) when the same file belongs in js/ or tests/.
+ * (for example features.js, player.js, settings-ui.js, *.test.js, fix-build-files.js) when the same file belongs in js/, tests/ or editions/.
  * The app only loads js/*.js; a stale js/player.js next to a newer root player.js is a classic reason for buttons that do nothing.
  *
  *   node editions/clean-strays.js           show what would be removed (nothing is changed)
@@ -17,7 +17,7 @@ const fix = process.argv.includes('--fix');
 const strays = [];
 for (const f of fs.readdirSync(root)) {
   if (!/\.js$/.test(f) || !fs.statSync(path.join(root, f)).isFile()) continue;
-  for (const dir of ['js', 'tests']) {
+  for (const dir of ['js', 'tests', 'editions']) {
     const proper = path.join(root, dir, f);
     if (fs.existsSync(proper)) {
       const a = fs.readFileSync(path.join(root, f)), b = fs.readFileSync(proper);
@@ -26,7 +26,7 @@ for (const f of fs.readdirSync(root)) {
   }
 }
 const leftovers = [];
-for (const f of fs.readdirSync(root)) if (/\.bak-before-fix$|\.edition-backup$/.test(f)) leftovers.push(f);
+for (const f of fs.readdirSync(root)) if (/\.bak-before-fix$|\.edition-backup$|^mpv-version\.txt$|^REMOVE_ONLINE_LEFTOVERS\.cmd$|^v[0-9.]+-source\.patch$|^PATCH-NOTES-v[0-9.]+\.md$/.test(f)) leftovers.push(f);
 try { for (const f of fs.readdirSync(path.join(root, 'assets', 'icons'))) if (/^shot-.*\.png$/i.test(f)) leftovers.push('assets/icons/' + f); } catch { /* no icons folder */ }
 if (leftovers.length) console.log('Leftover files that do not belong in the project (backups, screenshots):\n  ' + leftovers.join('\n  ') + '\n');
 if (!strays.length && !leftovers.length) { console.log('No stray copies found: the project layout is clean.'); process.exit(0); }

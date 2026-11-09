@@ -163,3 +163,8 @@ async function waitFor(fn, ms = 6000) { const t = Date.now(); while (Date.now() 
   const s2 = new MpvSession({ mpvPath: 'x', platform: 'win32' }); let again = 0; const ev2 = []; s2.on('recovering', () => ev2.push(1)); s2._launch = async () => { again++; return { ok: true }; }; const c2 = {}; s2.child = c2; s2.opts = { cfg: {} }; s2.startedAt = Date.now(); s2.recoveries = 0; s2._onExit(c2, 1, null); await new Promise((r) => setTimeout(r, 600));
   assert(ev2.length === 1 && again === 1, 'ordinary crashes still use the recovery ladder'); console.log('fatal-binary exit codes OK');
 })().catch((e) => { console.error(e); process.exit(1); });
+
+// ---- weak-PC playback profile: all cores for software decoding, GPU decode left on (it used to force 2 threads and no hardware decoding)
+(() => { const { buildArgs } = require(H.ROOT + '/mpv-session.js'); const a = buildArgs({ quality: 'high', ipcPath: 'x', platform: 'win32', perf: 'low', level: 0 }).join(' ');
+  if (!/--vd-lavc-threads=0/.test(a) || /--vd-lavc-threads=2/.test(a) || !/--vd-lavc-skiploopfilter=nonref/.test(a) || !/--scale=bilinear/.test(a) || /--hwdec=no/.test(a) || !/--hwdec=auto-safe/.test(a)) { console.error('FAIL low profile args: ' + a.match(/--(vd-lavc|hwdec|scale)[^ ]*/g)); process.exit(1); }
+  const b = buildArgs({ quality: 'high', ipcPath: 'x', platform: 'win32', perf: 'low', level: 2 }).join(' '); if (!/--hwdec=no/.test(b)) { console.error('FAIL level 2 must be software'); process.exit(1); } console.log('weak-PC profile OK'); })();

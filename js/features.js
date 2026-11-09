@@ -257,7 +257,8 @@
       case 'theme': setTheme(v); break;
       case 'accentMode': case 'accentColor': applyAccent(); break;
       case 'fsLine': body.classList.toggle('fs-line-off', !v); break;
-      case 'splash': case 'menuBar': if (api() && api().setSetting) api().setSetting(id, !!v); break;
+      case 'splash': case 'menuBar': case 'uiGpu': if (api() && api().setSetting) api().setSetting(id, !!v); break;
+      // (uiGpu only takes effect after a restart)
       case 'online': { const w = $('welcomeOnline'); if (w) w.checked = !!v; if (v && A.item) lookup(A.item, false); break; }
       case 'artMode': A.renderPlaylist(); break;
       case 'seekStep': case 'seekStepBig': case 'autoNext': case 'rememberPos': case 'skipBad': case 'volumeMax': case 'volumeStep': A.setPref(id, v); break;
@@ -276,7 +277,7 @@
   { const q = $('qualitySelect'); if (q) q.value = S.get('quality'); }
   pushAudioPrefs();
   if (S.get('deinterlace') || S.get('smoothMotion')) pushVideoPrefs();
-  if (api() && api().getSetting) ['splash', 'menuBar'].forEach((k) => api().getSetting(k).then((r) => { if (r && r.ok && typeof r.value === 'boolean' && r.value !== S.get(k)) S.set(k, r.value, { quiet: true }); }).catch(() => {}));
+  if (api() && api().getSetting) ['splash', 'menuBar', 'uiGpu'].forEach((k) => api().getSetting(k).then((r) => { if (r && r.ok && typeof r.value === 'boolean' && r.value !== S.get(k)) S.set(k, r.value, { quiet: true }); }).catch(() => {}));
   on($('fetchAllInfoBtn'), 'click', fetchAll);
   A.fetchAllInfo = fetchAll;
   A.clearOnlineCache = async () => {

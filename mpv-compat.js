@@ -19,11 +19,17 @@ const ARCH_RE = { x64: /^mpv-x86_64-\d{8}-git-[0-9a-f]+\.7z$/, ia32: /^mpv-i686-
 const KEEP_FILES = ['mpv.exe', 'mpv.com', 'd3dcompiler_43.dll', 'vulkan-1.dll', 'libmpv-2.dll'];
 
 /** Release assets for this CPU, newest first. */
-async function listCandidates({ fetchImpl, arch = 'x64', maxPages = 12 }) {
+async function listCandidates({ fetchImpl, arch = 'x64', maxPages = 12, cacheFile = null, maxAgeMs = 24 * 3600 * 1000 }) {
+  // the list is cached for a day: GitHub allows only ~60 anonymous requests per hour per network, and one search needs about a dozen
+  if (cacheFile) { try { const c = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); if (c && c.arch === arch && Array.isArray(c.cands) && c.cands.length && Date.now() - c.at < maxAgeMs) return c.cands; } catch { /* no cache */ } }
   const out = [];
   const re = ARCH_RE[arch] || ARCH_RE.x64;
   for (let page = 1; page <= maxPages; page++) {
     const r = await fetchImpl('https://api.github.com/repos/' + REPO + '/releases?per_page=100&page=' + page, { headers: { 'User-Agent': 'ZephyrPlayer-compat', Accept: 'application/vnd.github+json' } });
+    if (r && (r.status === 403 || r.status === 429)) {                         // GitHub's rate limit
+      if (page <= 3) { const e = new Error('rate limited'); e.code = 'RATE_LIMIT'; throw e; }
+      break;                                                                    // got enough of the history to search in
+    }
     if (!r || !r.ok) break;
     const list = await r.json();
     if (!Array.isArray(list) || !list.length) break;
@@ -33,6 +39,7 @@ async function listCandidates({ fetchImpl, arch = 'x64', maxPages = 12 }) {
     }
     if (list.length < 100) break;
   }
+  if (cacheFile && out.length) { try { fs.writeFileSync(cacheFile, JSON.stringify({ at: Date.now(), arch, cands: out })); } catch { /* not important */ } }
   return out;
 }
 
@@ -114,7 +121,12 @@ async function installCompatible({ toolsDir, arch = 'x64', fetchImpl, onProgress
   const runs = deps.runs || runsHere;
   fs.mkdirSync(toolsDir, { recursive: true });
   say('Looking at the available mpv builds…');
-  const cands = await listCandidates({ fetchImpl, arch });
+  let cands;
+  try { cands = await listCandidates({ fetchImpl, arch, cacheFile: path.join(toolsDir, 'mpv-candidates.json') }); }
+  catch (e) {
+    if (e && e.code === 'RATE_LIMIT') return { ok: false, rateLimited: true, error: 'GitHub is limiting requests from this network right now. Wait about an hour (it resets by itself) and press the button again.' };
+    return { ok: false, error: 'Could not read the list of mpv builds: ' + (e && e.message) };
+  }
   if (!cands.length) return { ok: false, error: 'Could not read the list of mpv builds (offline?)' };
   const work = fs.mkdtempSync(path.join(toolsDir, '_probe-'));
   const keep = new Map();                                                       // index -> extracted folder of a build that works

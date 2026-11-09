@@ -805,10 +805,10 @@
       res = item.stream
         ? await a.mpvPlayUrl(item.url, common.quality, true, {
             startPos: common.startPos, volume: common.volume, mute: common.mute, cookies: lsGet('zephyr-ytCookies') || '', cfg: window.ZApp ? window.ZApp.engineCfg() : undefined,
-            vo: lsGet('zephyr-settingVo') || 'gpu', hwdec: lsGet('zephyr-settingHwdec') || 'auto', perf: lsGet('zephyr-settingPerf') || 'smooth'
+            vo: lsGet('zephyr-settingVo') || 'gpu', hwdec: lsGet('zephyr-settingHwdec') || 'auto', perf: lsGet('zephyr-settingPerf') || 'auto'
           })
         : await a.mpvPlayExternal(Object.assign({ files: item.disc ? [] : [item.path], disc: item.disc || undefined, cfg: window.ZApp ? window.ZApp.engineCfg() : undefined,
-            vo: lsGet('zephyr-settingVo') || 'gpu', hwdec: lsGet('zephyr-settingHwdec') || 'auto', perf: lsGet('zephyr-settingPerf') || 'smooth' }, common));
+            vo: lsGet('zephyr-settingVo') || 'gpu', hwdec: lsGet('zephyr-settingHwdec') || 'auto', perf: lsGet('zephyr-settingPerf') || 'auto' }, common));
     } catch (e) { res = { ok: false, error: e && e.message }; }
     if (token !== loadToken) return;
 
